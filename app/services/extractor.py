@@ -17,7 +17,7 @@ TRANSCRIPT:
 CAPTION:
 {caption}
 
-TAXONOMY (46 Categories):
+TAXONOMY (6 Categories and their associated Subcategories):
 - Entertainment & Lifestyle: Food & Restaurants, Travel & Places, Fitness & Gym, Fashion & Style, Beauty & Skincare, Home Decor & Interior, Relationships & Dating, Motivation & Mindset, Humor & Memes, Spirituality & Religion
 - Knowledge & Learning: Study & Education, Science & Technology, History & Culture, Language Learning, Books & Reading, General Knowledge & Facts
 - Finance & Career: Stock Market & Trading, Personal Finance & Investing, Business & Startups, Career & Jobs, Crypto & Web3, Real Estate
@@ -29,8 +29,9 @@ Extract the following as a JSON object:
 {{
     "title": "A concise, descriptive title for this reel (max 10 words)",
     "summary": "A 2-3 sentence summary of what this reel is about",
-    "category": "Exactly ONE primary category string from the taxonomy list above",
-    "secondary_categories": ["Up to 2 secondary categories from the taxonomy list above that also apply. Empty array if none."],
+    "category": "Exactly ONE primary category string from the 6 broad sections (e.g., 'Entertainment & Lifestyle')",
+    "subcategory": "Exactly ONE specific subcategory string from the matched section (e.g., 'Food & Restaurants')",
+    "secondary_categories": ["Up to 2 secondary subcategories from the taxonomy list above that also apply. Empty array if none."],
     "key_facts": ["List of specific facts, tips, or pieces of information mentioned"],
     "locations": [
         {{
@@ -51,7 +52,7 @@ Rules:
 - Be specific with facts — don't be vague
 - For locations, ALWAYS include the city and country even if not explicitly stated
 - Correct any obvious phonetic spelling mistakes in city or neighborhood names.
-- Provide EXACT matches for Category strings from the taxonomy list. Nothing else.
+- Provide EXACT matches for Category and Subcategory strings from the taxonomy list. Nothing else.
 - Return ONLY the JSON object, no other text
 """
 
@@ -218,6 +219,7 @@ def extract_structured_data(
             title=data.get("title", "Untitled Reel"),
             summary=data.get("summary", ""),
             category=data.get("category", "Other"),
+            subcategory=data.get("subcategory", "Other"),
             secondary_categories=data.get("secondary_categories", []),
             key_facts=data.get("key_facts", []),
             locations=locations,
@@ -240,6 +242,7 @@ def extract_structured_data(
             title="Untitled Reel",
             summary=transcript[:200] if transcript else "",
             category="Other",
+            subcategory="Other",
         )
     except Exception as e:
         logger.error(f"Extraction error: {e}")

@@ -32,6 +32,7 @@ class SearchQuery(BaseModel):
     query: str = Field(..., description="Natural language search query")
     user_id: str = Field(default="default-user", description="Filter by user")
     category: Optional[str] = Field(None, description="Filter by category")
+    subcategory: Optional[str] = Field(None, description="Filter by subcategory")
     limit: int = Field(default=5, ge=1, le=20, description="Max results")
 
 
@@ -41,6 +42,7 @@ class ExtractedData(BaseModel):
     title: str = ""
     summary: str = ""
     category: str = "Other"
+    subcategory: str = "Other"
     secondary_categories: list[str] = Field(default_factory=list)
     key_facts: list[str] = Field(default_factory=list)
     locations: list[Location] = Field(default_factory=list)
@@ -58,6 +60,7 @@ class ReelResponse(BaseModel):
     summary: str
     transcript: str
     category: str
+    subcategory: str = "Other"
     secondary_categories: list[str] = Field(default_factory=list)
     key_facts: list[str] = Field(default_factory=list)
     locations: list[Location] = Field(default_factory=list)

@@ -46,6 +46,7 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
             "summary": extracted.summary,
             "transcript": transcript_text,
             "category": extracted.category,
+            "subcategory": extracted.subcategory,
             "secondary_categories": extracted.secondary_categories,
             "key_facts": extracted.key_facts,
             "locations": [loc.model_dump() for loc in extracted.locations],
@@ -60,7 +61,7 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
         logger.info("[Pipeline] Step 5/5: Indexing for semantic search...")
         
         sec_cats = ", ".join(extracted.secondary_categories)
-        search_text = f"{extracted.title}. {extracted.summary}. Primary Category: {extracted.category}. Secondary Categories: {sec_cats}. Caption: {caption}. Transcript: {transcript_text}"
+        search_text = f"{extracted.title}. {extracted.summary}. Primary Category: {extracted.category}. Subcategory: {extracted.subcategory}. Secondary Categories: {sec_cats}. Caption: {caption}. Transcript: {transcript_text}"
         embed_and_store(
             reel_id=reel_id,
             text=search_text,
@@ -68,6 +69,7 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
                 "user_id": user_id,
                 "title": extracted.title,
                 "category": extracted.category,
+                "subcategory": extracted.subcategory,
                 "summary": extracted.summary,
             },
         )
@@ -85,6 +87,7 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
             summary=extracted.summary,
             transcript=transcript_text,
             category=extracted.category,
+            subcategory=extracted.subcategory,
             secondary_categories=extracted.secondary_categories,
             key_facts=extracted.key_facts,
             locations=extracted.locations,
@@ -136,6 +139,7 @@ async def process_video_pipeline(
             "summary": extracted.summary,
             "transcript": transcript_text,
             "category": extracted.category,
+            "subcategory": extracted.subcategory,
             "secondary_categories": extracted.secondary_categories,
             "key_facts": extracted.key_facts,
             "locations": [loc.model_dump() for loc in extracted.locations],
@@ -150,7 +154,7 @@ async def process_video_pipeline(
         logger.info("[Pipeline] Step 4/4: Indexing for semantic search...")
         
         sec_cats = ", ".join(extracted.secondary_categories)
-        search_text = f"{extracted.title}. {extracted.summary}. Primary Category: {extracted.category}. Secondary Categories: {sec_cats}. Transcript: {transcript_text}"
+        search_text = f"{extracted.title}. {extracted.summary}. Primary Category: {extracted.category}. Subcategory: {extracted.subcategory}. Secondary Categories: {sec_cats}. Transcript: {transcript_text}"
         embed_and_store(
             reel_id=reel_id,
             text=search_text,
@@ -158,6 +162,7 @@ async def process_video_pipeline(
                 "user_id": user_id,
                 "title": extracted.title,
                 "category": extracted.category,
+                "subcategory": extracted.subcategory,
                 "summary": extracted.summary,
             },
         )
@@ -172,6 +177,7 @@ async def process_video_pipeline(
             summary=extracted.summary,
             transcript=transcript_text,
             category=extracted.category,
+            subcategory=extracted.subcategory,
             secondary_categories=extracted.secondary_categories,
             key_facts=extracted.key_facts,
             locations=extracted.locations,

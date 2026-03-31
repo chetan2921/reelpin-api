@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS reels (
     summary TEXT DEFAULT '',
     transcript TEXT DEFAULT '',
     category TEXT DEFAULT 'Other',
+    subcategory TEXT DEFAULT 'Other',
     secondary_categories JSONB DEFAULT '[]'::jsonb,
     key_facts JSONB DEFAULT '[]'::jsonb,
     locations JSONB DEFAULT '[]'::jsonb,
@@ -43,6 +44,9 @@ CREATE INDEX IF NOT EXISTS idx_reels_user_id ON reels(user_id);
 
 -- Index for category filtering
 CREATE INDEX IF NOT EXISTS idx_reels_category ON reels(category);
+
+-- Index for subcategory filtering
+CREATE INDEX IF NOT EXISTS idx_reels_subcategory ON reels(subcategory);
 """
 
 
@@ -90,6 +94,7 @@ def get_reel(reel_id: str) -> dict | None:
 def get_reels(
     user_id: str | None = None,
     category: str | None = None,
+    subcategory: str | None = None,
     limit: int = 50,
 ) -> list[dict]:
     """
@@ -98,6 +103,7 @@ def get_reels(
     Args:
         user_id: Filter by user
         category: Filter by category
+        subcategory: Filter by subcategory
         limit: Max number of results
 
     Returns:
@@ -111,6 +117,8 @@ def get_reels(
             query = query.eq("user_id", user_id)
         if category:
             query = query.eq("category", category)
+        if subcategory:
+            query = query.eq("subcategory", subcategory)
 
         query = query.order("created_at", desc=True).limit(limit)
         result = query.execute()

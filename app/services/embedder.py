@@ -73,6 +73,7 @@ def embed_and_store(reel_id: str, text: str, metadata: dict) -> None:
         "user_id": metadata.get("user_id", ""),
         "title": metadata.get("title", ""),
         "category": metadata.get("category", ""),
+        "subcategory": metadata.get("subcategory", ""),
         "summary": metadata.get("summary", "")[:500],  # Pinecone metadata size limit
     }
 
@@ -85,6 +86,7 @@ def search_similar(
     query: str,
     user_id: str | None = None,
     category: str | None = None,
+    subcategory: str | None = None,
     top_k: int = 5,
 ) -> list[dict]:
     """
@@ -94,6 +96,7 @@ def search_similar(
         query: Natural language search query
         user_id: Optional filter by user
         category: Optional filter by category
+        subcategory: Optional filter by subcategory
         top_k: Number of results to return
 
     Returns:
@@ -111,6 +114,8 @@ def search_similar(
         filter_dict["user_id"] = user_id
     if category:
         filter_dict["category"] = category
+    if subcategory:
+        filter_dict["subcategory"] = subcategory
 
     # Query Pinecone
     results = index.query(

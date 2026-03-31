@@ -126,11 +126,12 @@ async def process_video(
 async def list_reels(
     user_id: str = Query(default=None, description="Filter by user ID"),
     category: str = Query(default=None, description="Filter by category"),
+    subcategory: str = Query(default=None, description="Filter by subcategory"),
     limit: int = Query(default=50, ge=1, le=100, description="Max results"),
 ):
     """List saved reels with optional filters."""
     try:
-        reels = get_reels(user_id=user_id, category=category, limit=limit)
+        reels = get_reels(user_id=user_id, category=category, subcategory=subcategory, limit=limit)
         return [_db_record_to_response(r) for r in reels]
     except Exception as e:
         logger.error(f"List reels failed: {e}")
@@ -180,7 +181,10 @@ async def search_reels(query: SearchQuery):
             query=query.query,
             user_id=query.user_id,
             category=query.category,
+            # Pinecone specific subcategory filtering can be mapped if search_similar is updated
+            # For now passing it as keyword kwargs if available
             top_k=query.limit,
+            subcategory=query.subcategory
         )
 
         if not matches:
@@ -231,6 +235,7 @@ def _db_record_to_response(record: dict) -> ReelResponse:
         summary=record.get("summary", ""),
         transcript=record.get("transcript", ""),
         category=record.get("category", "Other"),
+        subcategory=record.get("subcategory", "Other"),
         secondary_categories=record.get("secondary_categories", []),
         key_facts=record.get("key_facts", []),
         locations=record.get("locations", []),
