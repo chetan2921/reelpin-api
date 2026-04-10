@@ -22,3 +22,4 @@ downloads/
 temp/
 *.mp4
 *.m4a
+.secrets/

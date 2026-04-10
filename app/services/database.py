@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from supabase import create_client, Client
 from app.config import get_settings
 
@@ -150,4 +151,37 @@ def get_reels_by_ids(reel_ids: list[str]) -> list[dict]:
         return result.data
     except Exception as e:
         logger.error(f"Failed to fetch reels by IDs: {e}")
+        raise
+
+
+def upsert_device_push_token(user_id: str, token: str, platform: str) -> dict:
+    client = _get_client()
+    try:
+        result = client.table("device_push_tokens").upsert(
+            {
+                "user_id": user_id,
+                "fcm_token": token,
+                "platform": platform,
+                "last_seen_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="fcm_token",
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to upsert device push token: {e}")
+        raise
+
+
+def get_device_push_tokens(user_id: str) -> list[str]:
+    client = _get_client()
+    try:
+        result = (
+            client.table("device_push_tokens")
+            .select("fcm_token")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return [row["fcm_token"] for row in result.data]
+    except Exception as e:
+        logger.error(f"Failed to fetch device push tokens for {user_id}: {e}")
         raise

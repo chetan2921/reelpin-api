@@ -36,6 +36,19 @@ class SearchQuery(BaseModel):
     limit: int = Field(default=5, ge=1, le=20, description="Max results")
 
 
+class DevicePushTokenInput(BaseModel):
+    user_id: str = Field(..., description="Authenticated user identifier")
+    token: str = Field(..., description="Firebase Cloud Messaging token")
+    platform: str = Field(..., description="ios, android, or web")
+
+
+class ProactiveRecallPushRequest(BaseModel):
+    user_id: str = Field(..., description="Target user identifier")
+    title: str = Field(..., description="Notification title")
+    body: str = Field(..., description="Notification body")
+    data: dict[str, str] = Field(default_factory=dict, description="Optional string data payload")
+
+
 # --- Extracted Data ---
 
 class ExtractedData(BaseModel):
@@ -84,3 +97,8 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     service: str = "ReelMind API"
+
+
+class GenericSuccessResponse(BaseModel):
+    success: bool = True
+    message: str = "ok"
