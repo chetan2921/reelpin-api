@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_KEY: str
 
+    # Firebase Cloud Messaging
+    FIREBASE_SERVICE_ACCOUNT_PATH: str | None = None
+
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"

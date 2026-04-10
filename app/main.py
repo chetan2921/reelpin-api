@@ -9,6 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.models import (
+    DevicePushTokenInput,
+    GenericSuccessResponse,
+    ProactiveRecallPushRequest,
     ReelInput,
     ReelResponse,
     SearchQuery,
@@ -18,7 +21,15 @@ from app.models import (
 )
 from app.pipeline import process_reel_pipeline, process_video_pipeline
 from app.services.embedder import init_pinecone, search_similar
-from app.services.database import get_reel, get_reels, delete_reel, get_reels_by_ids
+from app.services.database import (
+    delete_reel,
+    get_device_push_tokens,
+    get_reel,
+    get_reels,
+    get_reels_by_ids,
+    upsert_device_push_token,
+)
+from app.services.notifications import send_push_notification
 
 # Configure logging
 logging.basicConfig(
@@ -217,6 +228,38 @@ async def search_reels(query: SearchQuery):
 
     except Exception as e:
         logger.error(f"Search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/device-push-tokens", response_model=GenericSuccessResponse)
+async def register_device_push_token(payload: DevicePushTokenInput):
+    try:
+        upsert_device_push_token(
+            user_id=payload.user_id,
+            token=payload.token,
+            platform=payload.platform,
+        )
+        return GenericSuccessResponse(message="device token stored")
+    except Exception as e:
+        logger.error(f"Register device push token failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/proactive-recall/push", response_model=GenericSuccessResponse)
+async def send_proactive_recall_push(payload: ProactiveRecallPushRequest):
+    try:
+        tokens = get_device_push_tokens(payload.user_id)
+        delivered = send_push_notification(
+            tokens=tokens,
+            title=payload.title,
+            body=payload.body,
+            data=payload.data,
+        )
+        return GenericSuccessResponse(
+            message=f"push sent to {delivered} device(s)",
+        )
+    except Exception as e:
+        logger.error(f"Send proactive recall push failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
