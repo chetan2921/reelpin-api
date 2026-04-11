@@ -21,6 +21,14 @@ class Settings(BaseSettings):
 
     # Firebase Cloud Messaging
     FIREBASE_SERVICE_ACCOUNT_PATH: str | None = None
+    FIREBASE_SERVICE_ACCOUNT_JSON: str | None = None
+
+    # Queue / worker settings
+    REDIS_URL: str = "redis://localhost:6379/0"
+    JOB_MAX_RETRIES: int = 3
+    JOB_MIN_BACKOFF_MS: int = 15000
+    JOB_MAX_BACKOFF_MS: int = 300000
+    JOB_FETCH_LIMIT: int = 20
 
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"

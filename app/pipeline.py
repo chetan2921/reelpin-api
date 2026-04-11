@@ -1,5 +1,6 @@
 import logging
 import uuid
+from time import perf_counter
 from app.services.downloader import download_reel, cleanup_file
 from app.services.transcriber import transcribe_audio
 from app.services.extractor import extract_structured_data
@@ -10,35 +11,40 @@ from app.models import ReelResponse
 logger = logging.getLogger(__name__)
 
 
-async def process_reel_pipeline(url: str, user_id: str = "default-user") -> ReelResponse:
-    """
-    Full processing pipeline: download → transcribe → extract → embed → store.
-
-    Args:
-        url: Instagram reel URL
-        user_id: User identifier
-
-    Returns:
-        ReelResponse with all processed data
-    """
+async def process_reel_pipeline_with_metrics(
+    url: str,
+    user_id: str = "default-user",
+    progress_callback=None,
+) -> tuple[ReelResponse, dict[str, float]]:
     video_path = None
+    step_durations: dict[str, float] = {}
+
+    def _mark(step: str, progress: int) -> None:
+        if progress_callback is not None:
+            progress_callback(step, progress)
 
     try:
-        # Step 1: Download the reel and extract caption
-        logger.info(f"[Pipeline] Step 1/5: Downloading reel from {url}")
+        _mark("downloading", 12)
+        started = perf_counter()
         video_path, caption = download_reel(url)
+        step_durations["download_seconds"] = round(perf_counter() - started, 3)
+        logger.info(f"[Pipeline] Step 1/5 complete in {step_durations['download_seconds']}s")
 
-        # Step 2: Transcribe audio
-        logger.info("[Pipeline] Step 2/5: Transcribing audio...")
+        _mark("transcribing", 36)
+        started = perf_counter()
         transcript_result = transcribe_audio(video_path)
         transcript_text = transcript_result["text"]
+        step_durations["transcribe_seconds"] = round(perf_counter() - started, 3)
+        logger.info(f"[Pipeline] Step 2/5 complete in {step_durations['transcribe_seconds']}s")
 
-        # Step 3: Extract structured data
-        logger.info("[Pipeline] Step 3/5: Extracting structured data with AI...")
+        _mark("extracting", 58)
+        started = perf_counter()
         extracted = extract_structured_data(transcript=transcript_text, caption=caption)
+        step_durations["extract_seconds"] = round(perf_counter() - started, 3)
+        logger.info(f"[Pipeline] Step 3/5 complete in {step_durations['extract_seconds']}s")
 
-        # Step 4: Store in database
-        logger.info("[Pipeline] Step 4/5: Saving to database...")
+        _mark("saving", 76)
+        started = perf_counter()
         reel_data = {
             "user_id": user_id,
             "url": url,
@@ -53,15 +59,21 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
             "people_mentioned": extracted.people_mentioned,
             "actionable_items": extracted.actionable_items,
         }
-
         saved_record = save_reel(reel_data)
         reel_id = saved_record["id"]
+        step_durations["save_seconds"] = round(perf_counter() - started, 3)
+        logger.info(f"[Pipeline] Step 4/5 complete in {step_durations['save_seconds']}s")
 
-        # Step 5: Index in Pinecone for RAG search
-        logger.info("[Pipeline] Step 5/5: Indexing for semantic search...")
-        
+        _mark("embedding", 92)
+        started = perf_counter()
         sec_cats = ", ".join(extracted.secondary_categories)
-        search_text = f"{extracted.title}. {extracted.summary}. Primary Category: {extracted.category}. Subcategory: {extracted.subcategory}. Secondary Categories: {sec_cats}. Caption: {caption}. Transcript: {transcript_text}"
+        search_text = (
+            f"{extracted.title}. {extracted.summary}. "
+            f"Primary Category: {extracted.category}. "
+            f"Subcategory: {extracted.subcategory}. "
+            f"Secondary Categories: {sec_cats}. "
+            f"Caption: {caption}. Transcript: {transcript_text}"
+        )
         embed_and_store(
             reel_id=reel_id,
             text=search_text,
@@ -73,37 +85,50 @@ async def process_reel_pipeline(url: str, user_id: str = "default-user") -> Reel
                 "summary": extracted.summary,
             },
         )
+        step_durations["embed_seconds"] = round(perf_counter() - started, 3)
+        logger.info(f"[Pipeline] Step 5/5 complete in {step_durations['embed_seconds']}s")
 
-        # Update the record with the pinecone ID
-        # (pinecone_id == reel_id in our case)
-
-        logger.info(f"[Pipeline] ✅ Complete! Reel saved with ID: {reel_id}")
-
-        return ReelResponse(
-            id=reel_id,
-            user_id=user_id,
-            url=url,
-            title=extracted.title,
-            summary=extracted.summary,
-            transcript=transcript_text,
-            category=extracted.category,
-            subcategory=extracted.subcategory,
-            secondary_categories=extracted.secondary_categories,
-            key_facts=extracted.key_facts,
-            locations=extracted.locations,
-            people_mentioned=extracted.people_mentioned,
-            actionable_items=extracted.actionable_items,
-            created_at=saved_record.get("created_at"),
+        _mark("completed", 100)
+        return (
+            ReelResponse(
+                id=reel_id,
+                user_id=user_id,
+                url=url,
+                title=extracted.title,
+                summary=extracted.summary,
+                transcript=transcript_text,
+                category=extracted.category,
+                subcategory=extracted.subcategory,
+                secondary_categories=extracted.secondary_categories,
+                key_facts=extracted.key_facts,
+                locations=extracted.locations,
+                people_mentioned=extracted.people_mentioned,
+                actionable_items=extracted.actionable_items,
+                created_at=saved_record.get("created_at"),
+            ),
+            step_durations,
         )
-
     except Exception as e:
         logger.error(f"[Pipeline] ❌ Failed: {e}")
         raise
-
     finally:
-        # Always clean up the downloaded video
         if video_path:
             cleanup_file(video_path)
+
+
+async def process_reel_pipeline(url: str, user_id: str = "default-user") -> ReelResponse:
+    """
+    Full processing pipeline: download → transcribe → extract → embed → store.
+
+    Args:
+        url: Instagram reel URL
+        user_id: User identifier
+
+    Returns:
+        ReelResponse with all processed data
+    """
+    result, _ = await process_reel_pipeline_with_metrics(url=url, user_id=user_id)
+    return result
 
 
 async def process_video_pipeline(
