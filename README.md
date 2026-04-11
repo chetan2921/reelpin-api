@@ -61,5 +61,21 @@ Whenever a user shares an Instagram Reel to the app, the backend executes the fo
 - `GET /api/v1/reels` - Paginated fetch of saved reels.
 - `POST /api/v1/search` - RAG semantic vector search.
 
+## Railway Deploy
+
+Railway may fail to infer a start command automatically because the app entry
+point lives under `app/main.py`. This repo includes a `Procfile` with:
+
+```bash
+web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+worker: dramatiq app.tasks --processes 4 --threads 2
+```
+
+For Railway:
+- API service should use the `web` command
+- Worker service should use the `worker` command
+- both services need the same environment variables
+- worker additionally requires a valid `REDIS_URL`
+
 ---
 *Built tightly for the ReelPin Flutter application.*
