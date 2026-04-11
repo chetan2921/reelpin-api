@@ -1,4 +1,5 @@
 import logging
+import json
 from pathlib import Path
 
 import firebase_admin
@@ -18,15 +19,23 @@ def _get_firebase_app() -> firebase_admin.App:
         return _firebase_app
 
     settings = get_settings()
+    service_account_json = settings.FIREBASE_SERVICE_ACCOUNT_JSON
     service_account_path = settings.FIREBASE_SERVICE_ACCOUNT_PATH
-    if not service_account_path:
-        raise RuntimeError("FIREBASE_SERVICE_ACCOUNT_PATH is not configured")
 
-    path = Path(service_account_path)
-    if not path.exists():
-        raise RuntimeError(f"Firebase service account file not found: {path}")
+    if service_account_json:
+        credential = credentials.Certificate(json.loads(service_account_json))
+    else:
+        if not service_account_path:
+            raise RuntimeError(
+                "Either FIREBASE_SERVICE_ACCOUNT_JSON or FIREBASE_SERVICE_ACCOUNT_PATH must be configured"
+            )
 
-    credential = credentials.Certificate(str(path))
+        path = Path(service_account_path)
+        if not path.exists():
+            raise RuntimeError(f"Firebase service account file not found: {path}")
+
+        credential = credentials.Certificate(str(path))
+
     _firebase_app = firebase_admin.initialize_app(credential)
     logger.info("Firebase Admin initialized successfully")
     return _firebase_app

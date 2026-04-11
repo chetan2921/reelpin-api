@@ -2,12 +2,14 @@ import logging
 from datetime import datetime, timezone
 from supabase import create_client, Client
 from app.config import get_settings
+from app.models import ProcessingJobStatus
 
 logger = logging.getLogger(__name__)
 
 _supabase_client: Client | None = None
 
 TABLE_NAME = "reels"
+PROCESSING_JOBS_TABLE = "processing_jobs"
 
 
 def _get_client() -> Client:
@@ -48,6 +50,25 @@ CREATE INDEX IF NOT EXISTS idx_reels_category ON reels(category);
 
 -- Index for subcategory filtering
 CREATE INDEX IF NOT EXISTS idx_reels_subcategory ON reels(subcategory);
+
+CREATE TABLE IF NOT EXISTS processing_jobs (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    source_platform TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    current_step TEXT DEFAULT 'queued',
+    progress_percent INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    result_reel_id UUID,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    step_durations JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
 """
 
 
@@ -76,6 +97,102 @@ def save_reel(reel_data: dict) -> dict:
         return record
     except Exception as e:
         logger.error(f"Failed to save reel: {e}")
+        raise
+
+
+def create_processing_job(
+    *,
+    user_id: str,
+    url: str,
+    source_platform: str,
+    max_attempts: int,
+) -> dict:
+    client = _get_client()
+    try:
+        result = client.table(PROCESSING_JOBS_TABLE).insert(
+            {
+                "user_id": user_id,
+                "url": url,
+                "source_platform": source_platform,
+                "status": ProcessingJobStatus.queued.value,
+                "current_step": "queued",
+                "progress_percent": 0,
+                "attempt_count": 0,
+                "max_attempts": max_attempts,
+                "step_durations": {},
+            }
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to create processing job: {e}")
+        raise
+
+
+def update_processing_job(job_id: str, updates: dict) -> dict:
+    client = _get_client()
+    try:
+        updates = {
+            **updates,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .update(updates)
+            .eq("id", job_id)
+            .execute()
+        )
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to update processing job {job_id}: {e}")
+        raise
+
+
+def get_processing_job(job_id: str) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("id", job_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch processing job {job_id}: {e}")
+        raise
+
+
+def list_processing_jobs(
+    *,
+    user_id: str,
+    active_only: bool = False,
+    limit: int = 20,
+) -> list[dict]:
+    client = _get_client()
+    try:
+        query = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+
+        if active_only:
+            query = query.in_(
+                "status",
+                [
+                    ProcessingJobStatus.queued.value,
+                    ProcessingJobStatus.processing.value,
+                ],
+            )
+
+        result = query.execute()
+        return result.data
+    except Exception as e:
+        logger.error(f"Failed to list processing jobs for {user_id}: {e}")
         raise
 
 
