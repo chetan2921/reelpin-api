@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import get_settings
 from app.models import (
     DevicePushTokenInput,
     EnqueueReelJobInput,
@@ -24,7 +23,6 @@ from app.models import (
     HealthResponse,
 )
 from app.pipeline import process_reel_pipeline, process_video_pipeline
-from app.tasks import process_reel_job
 from app.services.embedder import init_pinecone, search_similar
 from app.services.database import (
     create_processing_job,
@@ -137,12 +135,14 @@ async def process_reel(input_data: ReelInput):
 @app.post("/api/v1/processing-jobs/reels", response_model=ProcessingJobResponse)
 async def enqueue_reel_processing(payload: EnqueueReelJobInput):
     try:
+        from app.tasks import process_reel_job
+
         source_platform = _derive_source_platform(payload.url)
         job = create_processing_job(
             user_id=payload.user_id,
             url=payload.url,
             source_platform=source_platform,
-            max_attempts=get_settings().JOB_MAX_RETRIES + 1,
+            max_attempts=4,
         )
         process_reel_job.send(job["id"])
         return _db_job_to_response(job)
