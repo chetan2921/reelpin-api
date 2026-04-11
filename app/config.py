@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"
-    EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
+    EMBEDDING_MODEL: str = "hashed-lexical-384"
     WHISPER_MODEL: str = "whisper-large-v3-turbo"
     LLM_MODEL: str = "llama-3.3-70b-versatile"
 

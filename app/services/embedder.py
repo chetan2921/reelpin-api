@@ -1,41 +1,56 @@
+import hashlib
 import logging
+import math
+import re
+from collections import Counter
+
 from pinecone import Pinecone, ServerlessSpec
-from sentence_transformers import SentenceTransformer
+
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# Module-level cache for the embedding model
-_model: SentenceTransformer | None = None
+EMBEDDING_DIMENSION = 384
 _pinecone_index = None
 
 
-def _get_model() -> SentenceTransformer:
-    """Lazy-load the sentence transformer model."""
-    global _model
-    if _model is None:
-        settings = get_settings()
-        logger.info(f"Loading embedding model: {settings.EMBEDDING_MODEL}")
-        _model = SentenceTransformer(settings.EMBEDDING_MODEL)
-    return _model
+def _tokenize(text: str) -> list[str]:
+    return [token for token in re.findall(r"[a-z0-9]+", text.lower()) if token]
+
+
+def _hash_embedding(text: str) -> list[float]:
+    vector = [0.0] * EMBEDDING_DIMENSION
+    token_counts = Counter(_tokenize(text))
+
+    if not token_counts:
+        return vector
+
+    for token, count in token_counts.items():
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:4], "big") % EMBEDDING_DIMENSION
+        sign = 1.0 if digest[4] % 2 == 0 else -1.0
+        vector[index] += sign * float(count)
+
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0:
+        return vector
+
+    return [value / norm for value in vector]
 
 
 def _get_index():
-    """Get or create the Pinecone index."""
     global _pinecone_index
     if _pinecone_index is None:
         settings = get_settings()
         pc = Pinecone(api_key=settings.PINECONE_API_KEY)
 
         index_name = settings.PINECONE_INDEX_NAME
-
-        # Check if index exists, create if not
         existing_indexes = [idx.name for idx in pc.list_indexes()]
         if index_name not in existing_indexes:
             logger.info(f"Creating Pinecone index: {index_name}")
             pc.create_index(
                 name=index_name,
-                dimension=384,  # all-MiniLM-L6-v2 outputs 384-dim vectors
+                dimension=EMBEDDING_DIMENSION,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
@@ -47,37 +62,23 @@ def _get_index():
 
 
 def init_pinecone() -> None:
-    """Initialize the Pinecone connection (call on startup)."""
     _get_index()
     logger.info("Pinecone initialized successfully")
 
 
 def embed_and_store(reel_id: str, text: str, metadata: dict) -> None:
-    """
-    Generate embedding for text and store in Pinecone.
-
-    Args:
-        reel_id: Unique identifier for the reel
-        text: Text to embed (transcript + summary combined)
-        metadata: Additional metadata to store with the vector
-    """
-    model = _get_model()
     index = _get_index()
+    embedding = _hash_embedding(text)
 
-    # Generate embedding
-    embedding = model.encode(text).tolist()
-
-    # Flatten metadata for Pinecone (no nested objects allowed)
     flat_metadata = {
         "reel_id": reel_id,
         "user_id": metadata.get("user_id", ""),
         "title": metadata.get("title", ""),
         "category": metadata.get("category", ""),
         "subcategory": metadata.get("subcategory", ""),
-        "summary": metadata.get("summary", "")[:500],  # Pinecone metadata size limit
+        "summary": metadata.get("summary", "")[:500],
     }
 
-    # Upsert to Pinecone
     index.upsert(vectors=[(reel_id, embedding, flat_metadata)])
     logger.info(f"Stored embedding for reel {reel_id}")
 
@@ -89,26 +90,9 @@ def search_similar(
     subcategory: str | None = None,
     top_k: int = 5,
 ) -> list[dict]:
-    """
-    Search for similar reels using semantic similarity.
-
-    Args:
-        query: Natural language search query
-        user_id: Optional filter by user
-        category: Optional filter by category
-        subcategory: Optional filter by subcategory
-        top_k: Number of results to return
-
-    Returns:
-        List of dicts with 'reel_id', 'score', and 'metadata'
-    """
-    model = _get_model()
     index = _get_index()
+    query_embedding = _hash_embedding(query)
 
-    # Generate query embedding
-    query_embedding = model.encode(query).tolist()
-
-    # Build filter
     filter_dict = {}
     if user_id:
         filter_dict["user_id"] = user_id
@@ -117,7 +101,6 @@ def search_similar(
     if subcategory:
         filter_dict["subcategory"] = subcategory
 
-    # Query Pinecone
     results = index.query(
         vector=query_embedding,
         top_k=top_k,
