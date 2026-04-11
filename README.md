@@ -67,13 +67,14 @@ Railway may fail to infer a start command automatically because the app entry
 point lives under `app/main.py`. This repo includes a `Procfile` with:
 
 ```bash
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-worker: dramatiq app.tasks --processes 4 --threads 2
+web: python start_service.py
+worker: SERVICE_MODE=worker python start_service.py
 ```
 
 For Railway:
-- API service should use the `web` command
-- Worker service should use the `worker` command
+- API service should use `python start_service.py`
+- Worker service should use `python start_service.py`
+- worker service must set `SERVICE_MODE=worker`
 - both services need the same environment variables
 - worker additionally requires a valid `REDIS_URL`
 

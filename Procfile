@@ -1,2 +1,2 @@
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-worker: dramatiq app.tasks --processes 4 --threads 2
+web: python start_service.py
+worker: SERVICE_MODE=worker python start_service.py
