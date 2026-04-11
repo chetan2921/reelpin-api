@@ -36,6 +36,31 @@ class SearchQuery(BaseModel):
     limit: int = Field(default=5, ge=1, le=20, description="Max results")
 
 
+class ProcessingJobStatus(str, Enum):
+    queued = "queued"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+
+
+class EnqueueReelJobInput(BaseModel):
+    url: str = Field(..., description="Instagram/TikTok/YouTube Shorts URL")
+    user_id: str = Field(..., description="Authenticated user identifier")
+
+
+class DevicePushTokenInput(BaseModel):
+    user_id: str = Field(..., description="Authenticated user identifier")
+    token: str = Field(..., description="Firebase Cloud Messaging token")
+    platform: str = Field(..., description="ios, android, or web")
+
+
+class ProactiveRecallPushRequest(BaseModel):
+    user_id: str = Field(..., description="Target user identifier")
+    title: str = Field(..., description="Notification title")
+    body: str = Field(..., description="Notification body")
+    data: dict[str, str] = Field(default_factory=dict, description="Optional string data payload")
+
+
 # --- Extracted Data ---
 
 class ExtractedData(BaseModel):
@@ -69,6 +94,26 @@ class ReelResponse(BaseModel):
     created_at: Optional[str] = None
 
 
+class ProcessingJobResponse(BaseModel):
+    id: str
+    user_id: str
+    url: str
+    source_platform: Optional[str] = None
+    status: ProcessingJobStatus
+    current_step: Optional[str] = None
+    progress_percent: int = 0
+    error_message: Optional[str] = None
+    attempt_count: int = 0
+    max_attempts: int = 0
+    result_reel_id: Optional[str] = None
+    step_durations: dict[str, float] = Field(default_factory=dict)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    reel: Optional[ReelResponse] = None
+
+
 class SearchResult(BaseModel):
     reel: ReelResponse
     relevance_score: float
@@ -84,3 +129,8 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     service: str = "ReelMind API"
+
+
+class GenericSuccessResponse(BaseModel):
+    success: bool = True
+    message: str = "ok"

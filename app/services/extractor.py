@@ -47,10 +47,14 @@ Extract the following as a JSON object:
 }}
 
 Rules:
+- Extract EVERY distinct location mention in the reel. If five different cafes, landmarks, stores, or places are mentioned, return all five.
+- Never merge multiple places into one item.
 - If no locations are mentioned, return an empty locations array
+- Never use null for location string fields. Use an empty string or omit the field instead.
 - If no people are mentioned, return an empty array
 - Be specific with facts — don't be vague
 - For locations, ALWAYS include the city and country even if not explicitly stated
+- If a business, neighborhood, mall, landmark, street market, gym, hotel, or venue is mentioned and it is likely to exist on Google Maps, include it.
 - Correct any obvious phonetic spelling mistakes in city or neighborhood names.
 - Provide EXACT matches for Category and Subcategory strings from the taxonomy list. Nothing else.
 - Return ONLY the JSON object, no other text
@@ -118,6 +122,13 @@ def geocode_location(location: Location) -> tuple[float | None, float | None]:
             logger.info(f"Retrying geocoding with fallback query: '{fallback_query}'")
             lat, lon = _call_gmaps(fallback_query)
 
+    # Final fallback: try the place name alone when the transcript has weak context
+    if lat is None and lon is None and location.name:
+        simple_query = location.name.strip()
+        if simple_query and simple_query not in {search_query, location.address}:
+            logger.info(f"Retrying geocoding with name-only query: '{simple_query}'")
+            lat, lon = _call_gmaps(simple_query)
+
     return lat, lon
 
 
@@ -125,8 +136,20 @@ def geocode_locations(locations: list[Location]) -> list[Location]:
     """
     Enrich a list of Location objects with lat/lng coordinates via geocoding.
     """
+    seen = set()
     enriched = []
     for loc in locations:
+        dedupe_key = (
+            (loc.name or "").strip().lower(),
+            (loc.address or "").strip().lower(),
+            (loc.city or "").strip().lower(),
+            (loc.state or "").strip().lower(),
+            (loc.country or "").strip().lower(),
+        )
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
         if loc.latitude is not None and loc.longitude is not None:
             enriched.append(loc)
             continue
@@ -177,13 +200,38 @@ def extract_structured_data(
         # Parse the JSON response
         data = json.loads(raw_response)
 
+        def _clean_text(value) -> str | None:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                cleaned = value.strip()
+                return cleaned or None
+            cleaned = str(value).strip()
+            return cleaned or None
+
         # Build Location objects from parsed JSON
         locations = []
-        for loc_data in data.get("locations", []):
-            neighborhood = loc_data.get("neighborhood")
-            city = loc_data.get("city")
-            state = loc_data.get("state")
-            country = loc_data.get("country")
+        raw_locations = data.get("locations", [])
+        if not isinstance(raw_locations, list):
+            raw_locations = []
+
+        for loc_data in raw_locations:
+            if not isinstance(loc_data, dict):
+                continue
+
+            name = _clean_text(loc_data.get("name"))
+            neighborhood = _clean_text(loc_data.get("neighborhood"))
+            city = _clean_text(loc_data.get("city"))
+            state = _clean_text(loc_data.get("state"))
+            country = _clean_text(loc_data.get("country"))
+
+            # Skip malformed location entries that have no usable place text.
+            if not any([name, neighborhood, city, state, country]):
+                continue
+
+            # If the model omitted the name but still returned a place hierarchy,
+            # use the most specific available component so processing never fails.
+            resolved_name = name or neighborhood or city or state or country or "Unknown place"
             
             # Reconstruct the legacy 'address' field for Flutter compatibility
             address_parts = [p for p in [neighborhood, city, state, country] if p]
@@ -191,7 +239,7 @@ def extract_structured_data(
             
             locations.append(
                 Location(
-                    name=loc_data.get("name", ""),
+                    name=resolved_name,
                     address=legacy_address,
                     neighborhood=neighborhood,
                     city=city,
