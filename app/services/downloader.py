@@ -28,6 +28,16 @@ _BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+_INSTAGRAM_API_HEADERS = {
+    "X-IG-App-ID": "936619743392459",
+    "X-ASBD-ID": "198387",
+    "X-IG-WWW-Claim": "0",
+    "Origin": "https://www.instagram.com",
+    "Accept": "*/*",
+    "Referer": "https://www.instagram.com/",
+    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+}
+
 
 @dataclass
 class DownloadedMedia:
@@ -75,6 +85,17 @@ def download_media(url: str) -> DownloadedMedia:
 
     try:
         if _is_instagram_url(url):
+            if instagram_cookie_header:
+                try:
+                    api_media = _download_authenticated_instagram_media(
+                        url,
+                        download_dir,
+                        cookie_header=instagram_cookie_header,
+                    )
+                    if api_media is not None:
+                        return api_media
+                except Exception as e:
+                    logger.warning("Authenticated Instagram API fetch failed: %s", e)
             try:
                 public_media = _download_public_instagram_media(
                     url,
@@ -213,6 +234,125 @@ def _download_public_instagram_media(
     raise Exception("Instagram did not expose a public media URL for this page.")
 
 
+def _download_authenticated_instagram_media(
+    url: str,
+    download_dir: str,
+    *,
+    cookie_header: str,
+) -> DownloadedMedia | None:
+    shortcode = _instagram_shortcode(url)
+    if not shortcode:
+        return None
+
+    media_pk = _instagram_shortcode_to_pk(shortcode)
+    request = urllib.request.Request(
+        f"https://i.instagram.com/api/v1/media/{media_pk}/info/",
+        headers={
+            **_INSTAGRAM_API_HEADERS,
+            "Cookie": cookie_header,
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise Exception(f"Instagram API info returned HTTP {e.code}") from e
+    except urllib.error.URLError as e:
+        raise Exception("Instagram API info request failed") from e
+
+    items = payload.get("items") or []
+    if not isinstance(items, list) or not items:
+        return None
+
+    item = items[0] or {}
+    caption = str(((item.get("caption") or {}).get("text")) or "")
+
+    carousel_media = item.get("carousel_media")
+    if isinstance(carousel_media, list) and carousel_media:
+        image_paths = _download_instagram_image_entries(
+            carousel_media,
+            download_dir,
+            cookie_header=cookie_header,
+        )
+        if image_paths:
+            return DownloadedMedia(
+                media_type="image",
+                media_paths=image_paths,
+                caption=caption,
+            )
+
+    image_paths = _download_instagram_image_entries(
+        [item],
+        download_dir,
+        cookie_header=cookie_header,
+    )
+    if image_paths:
+        return DownloadedMedia(
+            media_type="image",
+            media_paths=image_paths,
+            caption=caption,
+        )
+
+    video_versions = item.get("video_versions") or []
+    if video_versions:
+        best_video = max(
+            [entry for entry in video_versions if isinstance(entry, dict) and entry.get("url")],
+            key=lambda entry: int(entry.get("height") or 0) * int(entry.get("width") or 0),
+            default=None,
+        )
+        if best_video:
+            destination = os.path.join(download_dir, f"instagram-{uuid4().hex}.mp4")
+            _download_remote_file(
+                best_video["url"],
+                destination,
+                extra_headers={"Cookie": cookie_header, "Referer": "https://www.instagram.com/"},
+            )
+            return DownloadedMedia(
+                media_type="video",
+                media_paths=[destination],
+                caption=caption,
+            )
+
+    return None
+
+
+def _download_instagram_image_entries(
+    entries: list[dict],
+    download_dir: str,
+    *,
+    cookie_header: str,
+) -> list[str]:
+    image_paths: list[str] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("video_versions"):
+            continue
+
+        candidates = ((entry.get("image_versions2") or {}).get("candidates")) or []
+        if not isinstance(candidates, list) or not candidates:
+            continue
+
+        best_image = max(
+            [candidate for candidate in candidates if isinstance(candidate, dict) and candidate.get("url")],
+            key=lambda candidate: int(candidate.get("height") or 0) * int(candidate.get("width") or 0),
+            default=None,
+        )
+        if not best_image:
+            continue
+
+        destination = os.path.join(download_dir, f"instagram-{uuid4().hex}-{index}.jpg")
+        _download_remote_file(
+            best_image["url"],
+            destination,
+            extra_headers={"Cookie": cookie_header, "Referer": "https://www.instagram.com/"},
+        )
+        image_paths.append(destination)
+
+    return image_paths
+
+
 def _friendly_download_error(
     *,
     url: str,
@@ -331,6 +471,15 @@ def _is_instagram_url(url: str) -> bool:
     return "instagram.com" in host
 
 
+def _instagram_shortcode(url: str) -> str | None:
+    path_parts = [part for part in urllib.parse.urlparse(url).path.split("/") if part]
+    if len(path_parts) < 2:
+        return None
+    if path_parts[0] not in {"reel", "p", "tv"}:
+        return None
+    return path_parts[1]
+
+
 def _instagram_path_kind(url: str) -> str:
     path_parts = [part for part in urllib.parse.urlparse(url).path.split("/") if part]
     if not path_parts:
@@ -338,6 +487,14 @@ def _instagram_path_kind(url: str) -> str:
     if path_parts[0] in {"reel", "p", "tv"}:
         return path_parts[0]
     return "unknown"
+
+
+def _instagram_shortcode_to_pk(shortcode: str) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    value = 0
+    for character in shortcode[:11]:
+        value = value * len(alphabet) + alphabet.index(character)
+    return str(value)
 
 
 def _extract_instagram_image_urls(document: str) -> list[str]:
@@ -391,8 +548,16 @@ def _decode_escaped_url(value: str) -> str | None:
         return html.unescape(value.replace("\\/", "/"))
 
 
-def _download_remote_file(source_url: str, destination: str) -> None:
-    request = urllib.request.Request(source_url, headers=_BROWSER_HEADERS)
+def _download_remote_file(
+    source_url: str,
+    destination: str,
+    *,
+    extra_headers: dict[str, str] | None = None,
+) -> None:
+    request = urllib.request.Request(
+        source_url,
+        headers={**_BROWSER_HEADERS, **(extra_headers or {})},
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response, open(
             destination,
