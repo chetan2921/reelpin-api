@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     YTDLP_COOKIES_FROM_BROWSER: str | None = None
     YTDLP_COOKIE_DATA: str | None = None
     YTDLP_COOKIE_DATA_BASE64: str | None = None
+    INSTAGRAM_COOKIE_DATA: str | None = None
+    INSTAGRAM_COOKIE_DATA_BASE64: str | None = None
+    YOUTUBE_COOKIE_DATA: str | None = None
+    YOUTUBE_COOKIE_DATA_BASE64: str | None = None
+    TIKTOK_COOKIE_DATA: str | None = None
+    TIKTOK_COOKIE_DATA_BASE64: str | None = None
 
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"

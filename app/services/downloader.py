@@ -45,7 +45,7 @@ def download_media(url: str) -> DownloadedMedia:
     download_dir = settings.TEMP_DOWNLOAD_DIR
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
-    temp_cookie_file = _build_cookie_file_from_env()
+    temp_cookie_file = _build_cookie_file_from_env(url)
 
     output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
     ydl_opts = {
@@ -221,19 +221,21 @@ def _friendly_download_error(
     )
 
 
-def _build_cookie_file_from_env() -> str | None:
+def _build_cookie_file_from_env(url: str) -> str | None:
     settings = get_settings()
-    raw_cookies = None
+    platform = _platform_key(url)
+    raw_cookies = _decode_cookie_blob(
+        encoded=_platform_cookie_value(settings, platform, encoded=True),
+        plain=_platform_cookie_value(settings, platform, encoded=False),
+        encoded_label=f"{platform.upper()}_COOKIE_DATA_BASE64",
+    )
 
-    if settings.YTDLP_COOKIE_DATA_BASE64:
-        try:
-            raw_cookies = base64.b64decode(
-                settings.YTDLP_COOKIE_DATA_BASE64.encode("utf-8")
-            ).decode("utf-8")
-        except Exception as e:
-            raise Exception("YTDLP_COOKIE_DATA_BASE64 could not be decoded.") from e
-    elif settings.YTDLP_COOKIE_DATA:
-        raw_cookies = settings.YTDLP_COOKIE_DATA.replace("\\n", "\n")
+    if not raw_cookies:
+        raw_cookies = _decode_cookie_blob(
+            encoded=settings.YTDLP_COOKIE_DATA_BASE64,
+            plain=settings.YTDLP_COOKIE_DATA,
+            encoded_label="YTDLP_COOKIE_DATA_BASE64",
+        )
 
     if not raw_cookies:
         return None
@@ -247,6 +249,33 @@ def _build_cookie_file_from_env() -> str | None:
     ) as tmp:
         tmp.write(raw_cookies)
         return tmp.name
+
+
+def _platform_cookie_value(settings, platform: str, *, encoded: bool) -> str | None:
+    attr_name = f"{platform.upper()}_COOKIE_DATA_BASE64" if encoded else f"{platform.upper()}_COOKIE_DATA"
+    return getattr(settings, attr_name, None)
+
+
+def _decode_cookie_blob(*, encoded: str | None, plain: str | None, encoded_label: str) -> str | None:
+    if encoded:
+        try:
+            return base64.b64decode(encoded.encode("utf-8")).decode("utf-8")
+        except Exception as e:
+            raise Exception(f"{encoded_label} could not be decoded.") from e
+    if plain:
+        return plain.replace("\\n", "\n")
+    return None
+
+
+def _platform_key(url: str) -> str:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if "instagram" in host:
+        return "instagram"
+    if "youtube" in host or "youtu.be" in host:
+        return "youtube"
+    if "tiktok" in host:
+        return "tiktok"
+    return "ytdlp"
 
 
 def _platform_name(url: str) -> str:
