@@ -6,19 +6,10 @@ def main() -> None:
     service_mode = os.getenv("SERVICE_MODE", "api").strip().lower()
 
     if service_mode == "worker":
-        processes = os.getenv("DRAMATIQ_PROCESSES", "4")
-        threads = os.getenv("DRAMATIQ_THREADS", "2")
-        os.execvp(
-            "dramatiq",
-            [
-                "dramatiq",
-                "app.tasks",
-                "--processes",
-                processes,
-                "--threads",
-                threads,
-            ],
-        )
+        from app.tasks import run_worker
+
+        run_worker()
+        return
 
     port = os.getenv("PORT", "8000")
     os.execvp(

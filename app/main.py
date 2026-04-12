@@ -135,16 +135,13 @@ async def process_reel(input_data: ReelInput):
 @app.post("/api/v1/processing-jobs/reels", response_model=ProcessingJobResponse)
 async def enqueue_reel_processing(payload: EnqueueReelJobInput):
     try:
-        from app.tasks import process_reel_job
-
         source_platform = _derive_source_platform(payload.url)
         job = create_processing_job(
             user_id=payload.user_id,
             url=payload.url,
             source_platform=source_platform,
-            max_attempts=4,
+            max_attempts=1,
         )
-        process_reel_job.send(job["id"])
         return _db_job_to_response(job)
     except Exception as e:
         logger.error(f"Enqueue reel processing failed: {e}")

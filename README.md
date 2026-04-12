@@ -76,7 +76,8 @@ For Railway:
 - Worker service should use `python start_service.py`
 - worker service must set `SERVICE_MODE=worker`
 - both services need the same environment variables
-- worker additionally requires a valid `REDIS_URL`
+- worker polls the `processing_jobs` table directly, so `REDIS_URL` is optional and only kept for older Redis-based deployments
+- worker tuning env vars are `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_RECOVERY_INTERVAL_SECONDS`, and `WORKER_STALE_JOB_MINUTES`
 
 ---
 *Built tightly for the ReelPin Flutter application.*

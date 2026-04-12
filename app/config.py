@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     JOB_MIN_BACKOFF_MS: int = 15000
     JOB_MAX_BACKOFF_MS: int = 300000
     JOB_FETCH_LIMIT: int = 20
+    WORKER_POLL_INTERVAL_SECONDS: float = 3.0
+    WORKER_RECOVERY_INTERVAL_SECONDS: int = 60
+    WORKER_STALE_JOB_MINUTES: int = 20
+
+    # Instagram downloader auth
+    INSTAGRAM_COOKIES_FILE: str | None = None
+    YTDLP_COOKIES_FROM_BROWSER: str | None = None
 
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"

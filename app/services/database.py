@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from app.config import get_settings
 from app.models import ProcessingJobStatus
@@ -128,6 +128,51 @@ def create_processing_job(
         raise
 
 
+def claim_next_processing_job() -> dict | None:
+    client = _get_client()
+    settings = get_settings()
+
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("status", ProcessingJobStatus.queued.value)
+            .order("created_at")
+            .limit(settings.JOB_FETCH_LIMIT)
+            .execute()
+        )
+
+        for job in result.data:
+            now = datetime.now(timezone.utc).isoformat()
+            attempt_count = int(job.get("attempt_count", 0) or 0) + 1
+            claimed = (
+                client.table(PROCESSING_JOBS_TABLE)
+                .update(
+                    {
+                        "status": ProcessingJobStatus.processing.value,
+                        "current_step": "starting",
+                        "progress_percent": 5,
+                        "attempt_count": attempt_count,
+                        "started_at": now,
+                        "completed_at": None,
+                        "error_message": None,
+                        "updated_at": now,
+                    }
+                )
+                .eq("id", job["id"])
+                .eq("status", ProcessingJobStatus.queued.value)
+                .execute()
+            )
+
+            if claimed.data:
+                return claimed.data[0]
+
+        return None
+    except Exception as e:
+        logger.error(f"Failed to claim next processing job: {e}")
+        raise
+
+
 def update_processing_job(job_id: str, updates: dict) -> dict:
     client = _get_client()
     try:
@@ -161,6 +206,66 @@ def get_processing_job(job_id: str) -> dict | None:
         return None
     except Exception as e:
         logger.error(f"Failed to fetch processing job {job_id}: {e}")
+        raise
+
+
+def recover_stale_processing_jobs(*, stale_job_minutes: int) -> int:
+    client = _get_client()
+    recovered = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=stale_job_minutes)
+
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("status", ProcessingJobStatus.processing.value)
+            .limit(25)
+            .execute()
+        )
+
+        for job in result.data:
+            updated_at = (
+                job.get("updated_at")
+                or job.get("started_at")
+                or job.get("created_at")
+            )
+            if not updated_at:
+                continue
+
+            try:
+                last_update = datetime.fromisoformat(
+                    str(updated_at).replace("Z", "+00:00")
+                )
+            except ValueError:
+                continue
+
+            if last_update >= cutoff:
+                continue
+
+            reset = (
+                client.table(PROCESSING_JOBS_TABLE)
+                .update(
+                    {
+                        "status": ProcessingJobStatus.queued.value,
+                        "current_step": "queued",
+                        "progress_percent": 0,
+                        "started_at": None,
+                        "completed_at": None,
+                        "error_message": "Recovered after a worker interruption.",
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                .eq("id", job["id"])
+                .eq("status", ProcessingJobStatus.processing.value)
+                .execute()
+            )
+
+            if reset.data:
+                recovered += 1
+
+        return recovered
+    except Exception as e:
+        logger.error(f"Failed to recover stale processing jobs: {e}")
         raise
 
 

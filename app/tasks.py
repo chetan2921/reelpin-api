@@ -1,16 +1,18 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from time import perf_counter
 from urllib.parse import urlparse
 
-import dramatiq
-
 from app.config import get_settings
 from app.models import ProcessingJobStatus
 from app.pipeline import process_reel_pipeline_with_metrics
-import app.queue  # Ensures the broker is configured on import.
-from app.services.database import get_processing_job, update_processing_job
+from app.services.database import (
+    claim_next_processing_job,
+    recover_stale_processing_jobs,
+    update_processing_job,
+)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -27,32 +29,8 @@ def _derive_platform(url: str) -> str:
     return "web"
 
 
-@dramatiq.actor(
-    queue_name="reel_processing",
-    max_retries=settings.JOB_MAX_RETRIES,
-    min_backoff=settings.JOB_MIN_BACKOFF_MS,
-    max_backoff=settings.JOB_MAX_BACKOFF_MS,
-)
-def process_reel_job(job_id: str) -> None:
-    job = get_processing_job(job_id)
-    if not job:
-        logger.warning("Processing job %s not found", job_id)
-        return
-
-    attempt_count = int(job.get("attempt_count", 0)) + 1
-    update_processing_job(
-        job_id,
-        {
-            "status": ProcessingJobStatus.processing.value,
-            "current_step": "starting",
-            "progress_percent": 5,
-            "attempt_count": attempt_count,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "error_message": None,
-            "source_platform": _derive_platform(job["url"]),
-        },
-    )
-
+def process_reel_job(job: dict) -> None:
+    job_id = job["id"]
     start = perf_counter()
 
     try:
@@ -79,6 +57,7 @@ def process_reel_job(job_id: str) -> None:
                 "progress_percent": 100,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "result_reel_id": reel.id,
+                "source_platform": _derive_platform(job["url"]),
                 "step_durations": {
                     **step_durations,
                     "total_seconds": total_duration,
@@ -95,7 +74,36 @@ def process_reel_job(job_id: str) -> None:
                 "error_message": str(e),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "progress_percent": 100,
+                "source_platform": _derive_platform(job["url"]),
             },
         )
         logger.exception("Processing job %s failed: %s", job_id, e)
-        raise
+
+
+def run_worker() -> None:
+    logger.info(
+        "Background worker started with %.1fs polling interval",
+        settings.WORKER_POLL_INTERVAL_SECONDS,
+    )
+    last_recovery_at = 0.0
+
+    while True:
+        try:
+            now = time.monotonic()
+            if now - last_recovery_at >= settings.WORKER_RECOVERY_INTERVAL_SECONDS:
+                recovered = recover_stale_processing_jobs(
+                    stale_job_minutes=settings.WORKER_STALE_JOB_MINUTES,
+                )
+                if recovered:
+                    logger.warning("Recovered %s stalled processing job(s)", recovered)
+                last_recovery_at = now
+
+            job = claim_next_processing_job()
+            if not job:
+                time.sleep(settings.WORKER_POLL_INTERVAL_SECONDS)
+                continue
+
+            process_reel_job(job)
+        except Exception as e:
+            logger.exception("Worker loop iteration failed: %s", e)
+            time.sleep(settings.WORKER_POLL_INTERVAL_SECONDS)
