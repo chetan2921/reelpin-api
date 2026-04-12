@@ -7,6 +7,10 @@ from app.services.extractor import extract_structured_data
 from app.services.embedder import embed_and_store
 from app.services.database import save_reel
 from app.models import ReelResponse
+from app.services.youtube_transcripts import (
+    fetch_youtube_transcript,
+    is_youtube_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,15 +30,21 @@ async def process_reel_pipeline_with_metrics(
     try:
         _mark("downloading", 12)
         started = perf_counter()
-        downloaded = download_media(url)
-        media_paths = downloaded.media_paths
-        caption = downloaded.caption
+        if is_youtube_url(url):
+            downloaded = None
+            transcript_text, caption = fetch_youtube_transcript(url)
+        else:
+            downloaded = download_media(url)
+            media_paths = downloaded.media_paths
+            caption = downloaded.caption
         step_durations["download_seconds"] = round(perf_counter() - started, 3)
         logger.info(f"[Pipeline] Step 1/5 complete in {step_durations['download_seconds']}s")
 
         _mark("transcribing", 36)
         started = perf_counter()
-        if downloaded.media_type == "video":
+        if downloaded is None:
+            step_durations["transcribe_seconds"] = 0.0
+        elif downloaded.media_type == "video":
             transcript_result = transcribe_audio(downloaded.media_paths[0])
             transcript_text = transcript_result["text"]
             step_durations["transcribe_seconds"] = round(perf_counter() - started, 3)
