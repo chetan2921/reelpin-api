@@ -1,7 +1,7 @@
 import logging
-import uuid
 from time import perf_counter
-from app.services.downloader import download_reel, cleanup_file
+from app.services.downloader import cleanup_file, download_media
+from app.services.image_text import extract_text_from_images
 from app.services.transcriber import transcribe_audio
 from app.services.extractor import extract_structured_data
 from app.services.embedder import embed_and_store
@@ -16,7 +16,7 @@ async def process_reel_pipeline_with_metrics(
     user_id: str = "default-user",
     progress_callback=None,
 ) -> tuple[ReelResponse, dict[str, float]]:
-    video_path = None
+    media_paths: list[str] = []
     step_durations: dict[str, float] = {}
 
     def _mark(step: str, progress: int) -> None:
@@ -26,15 +26,23 @@ async def process_reel_pipeline_with_metrics(
     try:
         _mark("downloading", 12)
         started = perf_counter()
-        video_path, caption = download_reel(url)
+        downloaded = download_media(url)
+        media_paths = downloaded.media_paths
+        caption = downloaded.caption
         step_durations["download_seconds"] = round(perf_counter() - started, 3)
         logger.info(f"[Pipeline] Step 1/5 complete in {step_durations['download_seconds']}s")
 
         _mark("transcribing", 36)
         started = perf_counter()
-        transcript_result = transcribe_audio(video_path)
-        transcript_text = transcript_result["text"]
-        step_durations["transcribe_seconds"] = round(perf_counter() - started, 3)
+        if downloaded.media_type == "video":
+            transcript_result = transcribe_audio(downloaded.media_paths[0])
+            transcript_text = transcript_result["text"]
+            step_durations["transcribe_seconds"] = round(perf_counter() - started, 3)
+        else:
+            transcript_text = extract_text_from_images(downloaded.media_paths)
+            if not transcript_text.strip():
+                transcript_text = "(No readable text extracted from the image post.)"
+            step_durations["transcribe_seconds"] = round(perf_counter() - started, 3)
         logger.info(f"[Pipeline] Step 2/5 complete in {step_durations['transcribe_seconds']}s")
 
         _mark("extracting", 58)
@@ -112,8 +120,8 @@ async def process_reel_pipeline_with_metrics(
         logger.error(f"[Pipeline] ❌ Failed: {e}")
         raise
     finally:
-        if video_path:
-            cleanup_file(video_path)
+        for media_path in media_paths:
+            cleanup_file(media_path)
 
 
 async def process_reel_pipeline(url: str, user_id: str = "default-user") -> ReelResponse:

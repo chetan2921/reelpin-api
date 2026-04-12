@@ -116,9 +116,9 @@ async def health_check():
 @app.post("/api/v1/process-reel", response_model=ReelResponse)
 async def process_reel(input_data: ReelInput):
     """
-    Process an Instagram reel from URL.
+    Process a supported short-form URL or Instagram post from URL.
 
-    Full pipeline: download → transcribe → extract → embed → store.
+    Full pipeline: download → read/transcribe → extract → embed → store.
     """
     try:
         logger.info(f"Processing reel: {input_data.url} for user: {input_data.user_id}")

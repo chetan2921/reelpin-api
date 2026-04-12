@@ -24,7 +24,7 @@ class Location(BaseModel):
 # --- Request Models ---
 
 class ReelInput(BaseModel):
-    url: str = Field(..., description="Instagram reel URL")
+    url: str = Field(..., description="Instagram post/reel, TikTok, or YouTube Shorts URL")
     user_id: str = Field(default="default-user", description="User identifier")
 
 
@@ -44,7 +44,7 @@ class ProcessingJobStatus(str, Enum):
 
 
 class EnqueueReelJobInput(BaseModel):
-    url: str = Field(..., description="Instagram/TikTok/YouTube Shorts URL")
+    url: str = Field(..., description="Instagram post/reel, TikTok, or YouTube Shorts URL")
     user_id: str = Field(..., description="Authenticated user identifier")
 
 
