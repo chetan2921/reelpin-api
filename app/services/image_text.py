@@ -84,7 +84,7 @@ def extract_text_from_images(image_paths: list[str]) -> str:
                 },
             ],
             temperature=0.1,
-            max_completion_tokens=1800,
+            max_tokens=1800,
             response_format={"type": "json_object"},
         )
 
