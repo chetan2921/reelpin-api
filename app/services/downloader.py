@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -47,6 +48,12 @@ def download_media(url: str) -> DownloadedMedia:
     public_instagram_error = None
     temp_cookie_file = _build_cookie_file_from_env(url)
     instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
+    instagram_cookie_file = temp_cookie_file or settings.INSTAGRAM_COOKIES_FILE
+    instagram_cookie_header = (
+        _build_cookie_header(instagram_cookie_file, "instagram.com")
+        if _is_instagram_url(url)
+        else None
+    )
 
     output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
     ydl_opts = {
@@ -59,7 +66,7 @@ def download_media(url: str) -> DownloadedMedia:
         "noplaylist": True,
     }
 
-    cookie_file = temp_cookie_file or settings.INSTAGRAM_COOKIES_FILE
+    cookie_file = instagram_cookie_file
     if cookie_file:
         ydl_opts["cookiefile"] = cookie_file
 
@@ -69,7 +76,11 @@ def download_media(url: str) -> DownloadedMedia:
     try:
         if _is_instagram_url(url):
             try:
-                public_media = _download_public_instagram_media(url, download_dir)
+                public_media = _download_public_instagram_media(
+                    url,
+                    download_dir,
+                    cookie_header=instagram_cookie_header,
+                )
                 if public_media.media_type == "image":
                     return public_media
                 if instagram_kind != "post":
@@ -123,9 +134,20 @@ def download_reel(url: str) -> tuple[str, str]:
     return media.media_paths[0], media.caption
 
 
-def _download_public_instagram_media(url: str, download_dir: str) -> DownloadedMedia:
+def _download_public_instagram_media(
+    url: str,
+    download_dir: str,
+    *,
+    cookie_header: str | None = None,
+) -> DownloadedMedia:
     logger.info("Trying public Instagram page fetch for: %s", url)
-    request = urllib.request.Request(url, headers=_BROWSER_HEADERS)
+    request_headers = {
+        **_BROWSER_HEADERS,
+        "Referer": "https://www.instagram.com/",
+    }
+    if cookie_header:
+        request_headers["Cookie"] = cookie_header
+    request = urllib.request.Request(url, headers=request_headers)
 
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
@@ -386,6 +408,51 @@ def _download_remote_file(source_url: str, destination: str) -> None:
         raise FileNotFoundError(
             f"Media download completed but file not found at {destination}"
         )
+
+
+def _build_cookie_header(cookie_file: str | None, domain_suffix: str) -> str | None:
+    if not cookie_file or not os.path.exists(cookie_file):
+        return None
+
+    cookies: list[str] = []
+    try:
+        with open(cookie_file, encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+
+                domain, _, path, secure_flag, expires_at, name, value = parts[:7]
+                normalized_domain = domain.lstrip(".").lower()
+                if not (
+                    normalized_domain == domain_suffix
+                    or normalized_domain.endswith(f".{domain_suffix}")
+                ):
+                    continue
+
+                if expires_at.isdigit() and expires_at != "0":
+                    try:
+                        if int(expires_at) < int(time.time()):
+                            continue
+                    except ValueError:
+                        pass
+
+                if not name or not value:
+                    continue
+
+                cookies.append(f"{name}={value}")
+    except OSError as e:
+        logger.warning("Failed to parse cookie file %s: %s", cookie_file, e)
+        return None
+
+    if not cookies:
+        return None
+
+    return "; ".join(cookies)
 
 
 def cleanup_file(file_path: str) -> None:
