@@ -58,5 +58,16 @@ def transcribe_audio(video_path: str) -> dict:
         return result
 
     except Exception as e:
+        message = str(e)
+        if "no audio track found in file" in message.lower():
+            logger.info(
+                "No audio track found in %s, continuing with empty transcript",
+                video_path,
+            )
+            return {
+                "text": "",
+                "segments": [],
+            }
+
         logger.error(f"Transcription error: {e}")
         raise Exception(f"Failed to transcribe audio: {str(e)}")

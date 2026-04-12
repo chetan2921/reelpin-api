@@ -46,15 +46,17 @@ def download_media(url: str) -> DownloadedMedia:
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
     temp_cookie_file = _build_cookie_file_from_env(url)
+    instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
 
     output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
     ydl_opts = {
         "outtmpl": output_path,
-        "format": "best",
+        "format": _preferred_download_format(url),
         "quiet": True,
         "no_warnings": True,
         "postprocessors": [],
         "http_headers": _BROWSER_HEADERS,
+        "noplaylist": True,
     }
 
     cookie_file = temp_cookie_file or settings.INSTAGRAM_COOKIES_FILE
@@ -67,7 +69,11 @@ def download_media(url: str) -> DownloadedMedia:
     try:
         if _is_instagram_url(url):
             try:
-                return _download_public_instagram_media(url, download_dir)
+                public_media = _download_public_instagram_media(url, download_dir)
+                if public_media.media_type == "image":
+                    return public_media
+                if instagram_kind != "post":
+                    return public_media
             except Exception as e:
                 public_instagram_error = str(e)
                 logger.warning("Public Instagram fetch failed: %s", e)
@@ -276,6 +282,15 @@ def _platform_key(url: str) -> str:
     if "tiktok" in host:
         return "tiktok"
     return "ytdlp"
+
+
+def _preferred_download_format(url: str) -> str:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if "youtube" in host or "youtu.be" in host:
+        return "bestaudio[ext=m4a]/bestaudio/best[height<=360]/best"
+    if "instagram" in host or "tiktok" in host:
+        return "bestaudio/best[height<=360]/best"
+    return "bestaudio/best"
 
 
 def _platform_name(url: str) -> str:
