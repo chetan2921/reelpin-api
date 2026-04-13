@@ -32,7 +32,7 @@ def _get_firebase_app() -> firebase_admin.App:
 
         path = Path(service_account_path)
         if not path.exists():
-            raise RuntimeError(f"Firebase service account file not found: {path}")
+            raise RuntimeError("Configured Firebase service account file was not found.")
 
         credential = credentials.Certificate(str(path))
 

@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import urllib.request
 import urllib.parse
@@ -6,6 +7,10 @@ import time
 from groq import Groq
 from app.config import get_settings
 from app.models import ExtractedData, Location
+from app.services.database import (
+    get_geocode_cache_entry,
+    upsert_geocode_cache_entry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,9 @@ def geocode_location(location: Location) -> tuple[float | None, float | None]:
     search_query = ", ".join(query_parts)
 
     def _call_gmaps(query_string: str) -> tuple[float | None, float | None]:
+        cached = _lookup_geocode_cache(query_string)
+        if cached is not None:
+            return cached
         try:
             params = urllib.parse.urlencode({
                 "address": query_string,
@@ -103,9 +111,11 @@ def geocode_location(location: Location) -> tuple[float | None, float | None]:
                 lat = float(location_data["lat"])
                 lon = float(location_data["lng"])
                 logger.info(f"Geocoded '{query_string}' → ({lat}, {lon})")
+                _store_geocode_cache(query_string, "ok", lat, lon)
                 return lat, lon
             else:
                 logger.warning(f"Google Maps Geocoding returned {data.get('status')} for: '{query_string}'")
+                _store_geocode_cache(query_string, "not_found", None, None)
                 return None, None
         except Exception as e:
             logger.warning(f"Google Maps geocoding failed for '{query_string}': {e}")
@@ -130,6 +140,61 @@ def geocode_location(location: Location) -> tuple[float | None, float | None]:
             lat, lon = _call_gmaps(simple_query)
 
     return lat, lon
+
+
+def _lookup_geocode_cache(query_string: str) -> tuple[float | None, float | None] | None:
+    query_key = _geocode_cache_key(query_string)
+    try:
+        record = get_geocode_cache_entry(query_key)
+    except Exception:
+        return None
+
+    if not record:
+        return None
+
+    status = str(record.get("status") or "").strip().lower()
+    if status == "ok":
+        return (
+            _parse_cached_float(record.get("latitude")),
+            _parse_cached_float(record.get("longitude")),
+        )
+    if status == "not_found":
+        return (None, None)
+    return None
+
+
+def _store_geocode_cache(
+    query_string: str,
+    status: str,
+    latitude: float | None,
+    longitude: float | None,
+) -> None:
+    try:
+        upsert_geocode_cache_entry(
+            query_key=_geocode_cache_key(query_string),
+            query_text=query_string,
+            status=status,
+            latitude=latitude,
+            longitude=longitude,
+        )
+    except Exception as e:
+        logger.warning("Geocode cache write skipped: %s", e)
+
+
+def _geocode_cache_key(query_string: str) -> str:
+    normalized = " ".join(query_string.strip().lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _parse_cached_float(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except ValueError:
+        return None
 
 
 def geocode_locations(locations: list[Location]) -> list[Location]:

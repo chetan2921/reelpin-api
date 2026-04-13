@@ -3,15 +3,20 @@ import shutil
 import logging
 import tempfile
 import re
+from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.models import (
     DevicePushTokenInput,
     EnqueueReelJobInput,
+    FailureCode,
     GenericSuccessResponse,
+    ObservabilityMetricsResponse,
     ProcessingJobResponse,
     ProcessingJobStatus,
     ProactiveRecallPushRequest,
@@ -25,24 +30,57 @@ from app.models import (
 from app.pipeline import process_reel_pipeline, process_video_pipeline
 from app.services.embedder import init_pinecone, search_similar
 from app.services.database import (
+    create_completed_processing_job,
     create_processing_job,
+    count_processing_jobs_by_status_for_user,
+    count_processing_jobs_since,
     delete_reel,
+    find_processing_job_by_user_and_url,
+    find_processing_job_by_user_and_source_identity,
+    find_reel_by_user_and_url,
+    find_reel_by_user_and_source_identity,
     get_device_push_tokens,
+    get_processing_job_counts_by_status,
     get_processing_job,
     get_reel,
     get_reels,
     get_reels_by_ids,
+    list_processing_jobs_for_metrics,
     list_processing_jobs,
     upsert_device_push_token,
 )
 from app.services.notifications import send_push_notification
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+from app.services.observability import build_processing_metrics, log_processing_event
+from app.services.health_checks import (
+    build_live_health_response,
+    build_readiness_health_response,
 )
+from app.services.failures import classify_processing_failure
+from app.services.cost_controls import evaluate_submission_limits
+from app.services.api_responses import (
+    ApiResponseError,
+    failure_http_status,
+    failure_user_message,
+    is_retryable_failure_code,
+    processing_job_progress_percent,
+    processing_job_recommended_poll_after_seconds,
+    processing_job_retry_scheduled,
+    processing_job_retryable,
+    processing_job_status_message,
+    processing_job_terminal,
+)
+from app.services.security import (
+    build_secret_configuration_summary,
+    configure_secure_logging,
+    secret_configuration_warnings,
+)
+from app.services.processing_metadata import PROCESSING_VERSION
+from app.config import get_settings
+from app.services.source_identity import resolve_source_identity
+
+configure_secure_logging()
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 SEARCH_STOP_WORDS = {
     "a",
@@ -77,6 +115,12 @@ async def lifespan(app: FastAPI):
     """Initialize services on startup."""
     logger.info("🚀 Starting ReelMind API...")
     try:
+        logger.info(
+            "Runtime secret configuration: %s",
+            build_secret_configuration_summary(settings),
+        )
+        for warning in secret_configuration_warnings(settings):
+            logger.warning(warning)
         init_pinecone()
         logger.info("✅ All services initialized")
     except Exception as e:
@@ -102,6 +146,62 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(ApiResponseError)
+async def api_response_error_handler(_: Request, exc: ApiResponseError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_response_body().model_dump(),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_: Request, exc: RequestValidationError):
+    detail = exc.errors()[0].get("msg", "Request validation failed.") if exc.errors() else "Request validation failed."
+    response = ApiResponseError(
+        status_code=422,
+        error_code="validation_error",
+        message="The request is missing required fields or contains invalid values.",
+        detail=detail,
+        retryable=False,
+    )
+    return JSONResponse(
+        status_code=response.status_code,
+        content=response.to_response_body().model_dump(),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_: Request, exc: HTTPException):
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+    response = ApiResponseError(
+        status_code=exc.status_code,
+        error_code="http_error",
+        message=detail,
+        detail=detail,
+        retryable=False,
+    )
+    return JSONResponse(
+        status_code=response.status_code,
+        content=response.to_response_body().model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_: Request, exc: Exception):
+    logger.exception("Unhandled API exception: %s", exc)
+    response = ApiResponseError(
+        status_code=500,
+        error_code="internal_error",
+        message="The server could not finish this request.",
+        detail=str(exc) or "Unhandled server error",
+        retryable=True,
+    )
+    return JSONResponse(
+        status_code=response.status_code,
+        content=response.to_response_body().model_dump(),
+    )
+
+
 # ============================================================
 #                          ENDPOINTS
 # ============================================================
@@ -109,8 +209,25 @@ app.add_middleware(
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
-    return HealthResponse()
+    """Detailed health endpoint that keeps backward-compatible 200 responses."""
+    return build_readiness_health_response()
+
+
+@app.get("/api/v1/health/live", response_model=HealthResponse)
+async def health_live():
+    """Liveness probe for the API process itself."""
+    return build_live_health_response()
+
+
+@app.get("/api/v1/health/ready", response_model=HealthResponse)
+async def health_ready():
+    """Readiness probe that returns 503 when dependencies are degraded."""
+    payload = build_readiness_health_response()
+    status_code = 200 if payload.ready else 503
+    return JSONResponse(
+        status_code=status_code,
+        content=payload.model_dump(),
+    )
 
 
 @app.post("/api/v1/process-reel", response_model=ReelResponse)
@@ -121,31 +238,195 @@ async def process_reel(input_data: ReelInput):
     Full pipeline: download → read/transcribe → extract → embed → store.
     """
     try:
-        logger.info(f"Processing reel: {input_data.url} for user: {input_data.user_id}")
+        source = resolve_source_identity(input_data.url)
+        log_processing_event(
+            logger,
+            "api.process_reel.requested",
+            user_id=input_data.user_id,
+            url=source.normalized_url,
+            source=source,
+            processing_step="requested",
+        )
+        existing_reel = find_reel_by_user_and_url(
+            user_id=input_data.user_id,
+            url=source.normalized_url,
+        )
+        if not existing_reel and source.source_content_id:
+            existing_reel = find_reel_by_user_and_source_identity(
+                user_id=input_data.user_id,
+                source_platform=source.source_platform,
+                source_content_id=source.source_content_id,
+            )
+        if existing_reel:
+            log_processing_event(
+                logger,
+                "api.process_reel.reused_existing_reel",
+                user_id=input_data.user_id,
+                url=source.normalized_url,
+                source=source,
+                processing_step="reused_existing_reel",
+                status="completed",
+                extra={"result_reel_id": existing_reel["id"]},
+            )
+            return _db_record_to_response(existing_reel)
+
+        _enforce_submission_limits(input_data.user_id)
+
         result = await process_reel_pipeline(
-            url=input_data.url,
+            url=source.normalized_url,
             user_id=input_data.user_id,
         )
         return result
+    except ValueError as e:
+        raise ApiResponseError(
+            status_code=400,
+            error_code="invalid_request",
+            message="The shared URL is invalid.",
+            detail=str(e),
+            retryable=False,
+        )
     except Exception as e:
         logger.error(f"Process reel failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        failure = classify_processing_failure(e)
+        raise ApiResponseError(
+            status_code=failure_http_status(failure.code),
+            error_code=failure.code.value,
+            message=failure_user_message(failure.code, fallback="The reel could not be processed."),
+            detail=failure.message,
+            retryable=is_retryable_failure_code(failure.code),
+        )
 
 
 @app.post("/api/v1/processing-jobs/reels", response_model=ProcessingJobResponse)
 async def enqueue_reel_processing(payload: EnqueueReelJobInput):
     try:
-        source_platform = _derive_source_platform(payload.url)
+        source = resolve_source_identity(payload.url)
+        log_processing_event(
+            logger,
+            "api.processing_job.enqueue_requested",
+            user_id=payload.user_id,
+            url=source.normalized_url,
+            source=source,
+            processing_step="queued",
+        )
+        existing_job = find_processing_job_by_user_and_url(
+            user_id=payload.user_id,
+            url=source.normalized_url,
+            statuses=[
+                ProcessingJobStatus.queued.value,
+                ProcessingJobStatus.processing.value,
+                ProcessingJobStatus.completed.value,
+            ],
+        )
+        if not existing_job and source.source_content_id:
+            existing_job = find_processing_job_by_user_and_source_identity(
+                user_id=payload.user_id,
+                source_platform=source.source_platform,
+                source_content_id=source.source_content_id,
+                statuses=[
+                    ProcessingJobStatus.queued.value,
+                    ProcessingJobStatus.processing.value,
+                    ProcessingJobStatus.completed.value,
+                ],
+            )
+        if existing_job and (
+            existing_job.get("status") != ProcessingJobStatus.completed.value
+            or existing_job.get("result_reel_id")
+        ):
+            log_processing_event(
+                logger,
+                "api.processing_job.reused_existing_job",
+                job_id=existing_job.get("id"),
+                user_id=payload.user_id,
+                url=source.normalized_url,
+                source=source,
+                processing_step=str(existing_job.get("current_step") or "queued"),
+                status=str(existing_job.get("status") or "queued"),
+                attempt_count=int(existing_job.get("attempt_count", 0) or 0),
+                max_attempts=int(existing_job.get("max_attempts", 0) or 0),
+            )
+            return _db_job_to_response(existing_job)
+
+        existing_reel = find_reel_by_user_and_url(
+            user_id=payload.user_id,
+            url=source.normalized_url,
+        )
+        if not existing_reel and source.source_content_id:
+            existing_reel = find_reel_by_user_and_source_identity(
+                user_id=payload.user_id,
+                source_platform=source.source_platform,
+                source_content_id=source.source_content_id,
+            )
+        if existing_reel:
+            job = create_completed_processing_job(
+                user_id=payload.user_id,
+                url=source.normalized_url,
+                normalized_url=source.normalized_url,
+                source_platform=source.source_platform,
+                source_content_type=source.source_content_type,
+                source_content_id=source.source_content_id,
+                processing_version=PROCESSING_VERSION,
+                ingestion_method="url_share",
+                transcript_source=existing_reel.get("transcript_source"),
+                result_reel_id=existing_reel["id"],
+                max_attempts=settings.PROCESSING_JOB_DEFAULT_MAX_ATTEMPTS,
+            )
+            log_processing_event(
+                logger,
+                "api.processing_job.completed_from_cache",
+                job_id=job.get("id"),
+                user_id=payload.user_id,
+                url=source.normalized_url,
+                source=source,
+                processing_step="completed",
+                status="completed",
+                extra={"result_reel_id": existing_reel["id"]},
+            )
+            return _db_job_to_response(job)
+
+        _enforce_submission_limits(payload.user_id)
+
         job = create_processing_job(
             user_id=payload.user_id,
-            url=payload.url,
-            source_platform=source_platform,
-            max_attempts=1,
+            url=source.normalized_url,
+            normalized_url=source.normalized_url,
+            source_platform=source.source_platform,
+            source_content_type=source.source_content_type,
+            source_content_id=source.source_content_id,
+            processing_version=PROCESSING_VERSION,
+            ingestion_method="url_share",
+            max_attempts=settings.PROCESSING_JOB_DEFAULT_MAX_ATTEMPTS,
+        )
+        log_processing_event(
+            logger,
+            "api.processing_job.created",
+            job_id=job.get("id"),
+            user_id=payload.user_id,
+            url=source.normalized_url,
+            source=source,
+            processing_step="queued",
+            status="queued",
+            attempt_count=int(job.get("attempt_count", 0) or 0),
+            max_attempts=int(job.get("max_attempts", 0) or 0),
         )
         return _db_job_to_response(job)
+    except ValueError as e:
+        raise ApiResponseError(
+            status_code=400,
+            error_code="invalid_request",
+            message="The shared URL is invalid.",
+            detail=str(e),
+            retryable=False,
+        )
     except Exception as e:
         logger.error(f"Enqueue reel processing failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="processing_job_enqueue_failed",
+            message="Could not create a processing job right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.get("/api/v1/processing-jobs/{job_id}", response_model=ProcessingJobResponse)
@@ -153,13 +434,25 @@ async def get_processing_job_detail(job_id: str):
     try:
         job = get_processing_job(job_id)
         if not job:
-            raise HTTPException(status_code=404, detail="Processing job not found")
+            raise ApiResponseError(
+                status_code=404,
+                error_code="processing_job_not_found",
+                message="The processing job was not found.",
+                detail="Processing job not found",
+                retryable=False,
+            )
         return _db_job_to_response(job)
-    except HTTPException:
+    except ApiResponseError:
         raise
     except Exception as e:
         logger.error(f"Get processing job failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="processing_job_lookup_failed",
+            message="Could not load the processing job right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.get("/api/v1/processing-jobs", response_model=list[ProcessingJobResponse])
@@ -173,7 +466,38 @@ async def get_processing_job_list(
         return [_db_job_to_response(job) for job in jobs]
     except Exception as e:
         logger.error(f"List processing jobs failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="processing_job_list_failed",
+            message="Could not load processing jobs right now.",
+            detail=str(e),
+            retryable=True,
+        )
+
+
+@app.get("/api/v1/metrics", response_model=ObservabilityMetricsResponse)
+async def get_metrics():
+    try:
+        metrics = build_processing_metrics(
+            jobs=list_processing_jobs_for_metrics(limit=500),
+            queue_depth=get_processing_job_counts_by_status(
+                [
+                    ProcessingJobStatus.queued.value,
+                    ProcessingJobStatus.processing.value,
+                    ProcessingJobStatus.dead_lettered.value,
+                ]
+            ),
+        )
+        return ObservabilityMetricsResponse(**metrics)
+    except Exception as e:
+        logger.error(f"Get metrics failed: {e}")
+        raise ApiResponseError(
+            status_code=500,
+            error_code="metrics_unavailable",
+            message="Metrics are not available right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.post("/api/v1/process-video", response_model=ReelResponse)
@@ -190,6 +514,7 @@ async def process_video(
     # Save uploaded file to temp location
     temp_path = None
     try:
+        _enforce_submission_limits(user_id)
         suffix = os.path.splitext(video.filename or ".mp4")[1]
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             shutil.copyfileobj(video.file, tmp)
@@ -207,7 +532,14 @@ async def process_video(
         # Clean up on error
         if temp_path and os.path.exists(temp_path):
             os.remove(temp_path)
-        raise HTTPException(status_code=500, detail=str(e))
+        failure = classify_processing_failure(e)
+        raise ApiResponseError(
+            status_code=failure_http_status(failure.code),
+            error_code=failure.code.value,
+            message=failure_user_message(failure.code, fallback="The uploaded video could not be processed."),
+            detail=failure.message,
+            retryable=is_retryable_failure_code(failure.code),
+        )
 
 
 @app.get("/api/v1/reels", response_model=list[ReelResponse])
@@ -223,7 +555,13 @@ async def list_reels(
         return [_db_record_to_response(r) for r in reels]
     except Exception as e:
         logger.error(f"List reels failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="reel_list_failed",
+            message="Could not load reels right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.get("/api/v1/reels/{reel_id}", response_model=ReelResponse)
@@ -232,13 +570,25 @@ async def get_reel_detail(reel_id: str):
     try:
         record = get_reel(reel_id)
         if not record:
-            raise HTTPException(status_code=404, detail="Reel not found")
+            raise ApiResponseError(
+                status_code=404,
+                error_code="reel_not_found",
+                message="The reel was not found.",
+                detail="Reel not found",
+                retryable=False,
+            )
         return _db_record_to_response(record)
-    except HTTPException:
+    except ApiResponseError:
         raise
     except Exception as e:
         logger.error(f"Get reel failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="reel_lookup_failed",
+            message="Could not load the reel right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.delete("/api/v1/reels/{reel_id}")
@@ -247,13 +597,25 @@ async def remove_reel(reel_id: str):
     try:
         deleted = delete_reel(reel_id)
         if not deleted:
-            raise HTTPException(status_code=404, detail="Reel not found")
+            raise ApiResponseError(
+                status_code=404,
+                error_code="reel_not_found",
+                message="The reel was not found.",
+                detail="Reel not found",
+                retryable=False,
+            )
         return {"message": "Reel deleted", "id": reel_id}
-    except HTTPException:
+    except ApiResponseError:
         raise
     except Exception as e:
         logger.error(f"Delete reel failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="reel_delete_failed",
+            message="Could not delete the reel right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.post("/api/v1/search", response_model=SearchResponse)
@@ -329,7 +691,13 @@ async def search_reels(query: SearchQuery):
 
     except Exception as e:
         logger.error(f"Search failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="search_failed",
+            message="Search is not available right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.post("/api/v1/device-push-tokens", response_model=GenericSuccessResponse)
@@ -343,7 +711,13 @@ async def register_device_push_token(payload: DevicePushTokenInput):
         return GenericSuccessResponse(message="device token stored")
     except Exception as e:
         logger.error(f"Register device push token failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="device_token_registration_failed",
+            message="Could not register the device token right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 @app.post("/api/v1/proactive-recall/push", response_model=GenericSuccessResponse)
@@ -361,7 +735,13 @@ async def send_proactive_recall_push(payload: ProactiveRecallPushRequest):
         )
     except Exception as e:
         logger.error(f"Send proactive recall push failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise ApiResponseError(
+            status_code=500,
+            error_code="push_send_failed",
+            message="Could not send the push notification right now.",
+            detail=str(e),
+            retryable=True,
+        )
 
 
 # ============================================================
@@ -375,6 +755,13 @@ def _db_record_to_response(record: dict) -> ReelResponse:
         id=record["id"],
         user_id=record.get("user_id", ""),
         url=record.get("url", ""),
+        normalized_url=record.get("normalized_url"),
+        source_platform=record.get("source_platform"),
+        source_content_type=record.get("source_content_type"),
+        source_content_id=record.get("source_content_id"),
+        processing_version=record.get("processing_version"),
+        ingestion_method=record.get("ingestion_method"),
+        transcript_source=record.get("transcript_source"),
         title=record.get("title", ""),
         summary=record.get("summary", ""),
         transcript=record.get("transcript", ""),
@@ -402,13 +789,26 @@ def _db_job_to_response(record: dict) -> ProcessingJobResponse:
         id=record["id"],
         user_id=record.get("user_id", ""),
         url=record.get("url", ""),
+        normalized_url=record.get("normalized_url"),
         source_platform=record.get("source_platform"),
+        source_content_type=record.get("source_content_type"),
+        source_content_id=record.get("source_content_id"),
+        processing_version=record.get("processing_version"),
+        ingestion_method=record.get("ingestion_method"),
+        transcript_source=record.get("transcript_source"),
         status=ProcessingJobStatus(record.get("status", "queued")),
         current_step=record.get("current_step"),
-        progress_percent=int(record.get("progress_percent", 0) or 0),
+        progress_percent=processing_job_progress_percent(record),
+        failure_code=_parse_failure_code(record.get("failure_code")),
         error_message=record.get("error_message"),
         attempt_count=int(record.get("attempt_count", 0) or 0),
         max_attempts=int(record.get("max_attempts", 0) or 0),
+        next_retry_at=record.get("next_retry_at"),
+        terminal=processing_job_terminal(record),
+        retry_scheduled=processing_job_retry_scheduled(record),
+        retryable=processing_job_retryable(record),
+        status_message=processing_job_status_message(record),
+        recommended_poll_after_seconds=processing_job_recommended_poll_after_seconds(record),
         result_reel_id=result_reel_id,
         step_durations=record.get("step_durations", {}) or {},
         created_at=record.get("created_at"),
@@ -420,14 +820,46 @@ def _db_job_to_response(record: dict) -> ProcessingJobResponse:
 
 
 def _derive_source_platform(url: str) -> str:
-    lowered = url.lower()
-    if "instagram.com" in lowered:
-        return "instagram"
-    if "tiktok.com" in lowered:
-        return "tiktok"
-    if "youtube.com" in lowered or "youtu.be" in lowered:
-        return "youtube"
-    return "web"
+    return resolve_source_identity(url).source_platform
+
+
+def _parse_failure_code(value: str | None) -> FailureCode | None:
+    if not value:
+        return None
+
+    try:
+        return FailureCode(value)
+    except ValueError:
+        return None
+
+
+def _enforce_submission_limits(user_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    decision = evaluate_submission_limits(
+        recent_submission_count=count_processing_jobs_since(
+            user_id=user_id,
+            since_iso=(now - timedelta(hours=1)).isoformat(),
+        ),
+        active_job_count=count_processing_jobs_by_status_for_user(
+            user_id=user_id,
+            statuses=[
+                ProcessingJobStatus.queued.value,
+                ProcessingJobStatus.processing.value,
+            ],
+        ),
+        max_submissions_per_hour=settings.USER_SUBMISSION_LIMIT_PER_HOUR,
+        max_active_jobs=settings.USER_ACTIVE_JOB_LIMIT,
+    )
+    if decision.allowed:
+        return
+
+    raise ApiResponseError(
+        status_code=429,
+        error_code=decision.error_code or "submission_rate_limited",
+        message=decision.message or "Submission limit reached.",
+        detail=decision.detail or "Submission limit reached.",
+        retryable=True,
+    )
 
 
 def _search_tokens(query: str) -> list[str]:

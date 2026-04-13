@@ -3,6 +3,13 @@ from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from app.config import get_settings
 from app.models import ProcessingJobStatus
+from app.services.queue_control import (
+    active_platform_counts,
+    active_source_keys,
+    can_claim_job,
+    job_source_key,
+)
+from app.services.source_identity import normalize_source_url, resolve_source_identity
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +17,10 @@ _supabase_client: Client | None = None
 
 TABLE_NAME = "reels"
 PROCESSING_JOBS_TABLE = "processing_jobs"
+PROCESSING_CACHE_TABLE = "processing_cache"
+SERVICE_HEALTH_TABLE = "service_health"
+GEOCODE_CACHE_TABLE = "geocode_cache"
+URL_MATCH_FALLBACK_LIMIT = 100
 
 
 def _get_client() -> Client:
@@ -17,7 +28,10 @@ def _get_client() -> Client:
     global _supabase_client
     if _supabase_client is None:
         settings = get_settings()
-        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        _supabase_client = create_client(
+            settings.SUPABASE_URL,
+            settings.resolved_supabase_key(),
+        )
         logger.info("Supabase client initialized")
     return _supabase_client
 
@@ -28,6 +42,13 @@ CREATE TABLE IF NOT EXISTS reels (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id TEXT NOT NULL DEFAULT 'default-user',
     url TEXT NOT NULL,
+    normalized_url TEXT,
+    source_platform TEXT,
+    source_content_type TEXT,
+    source_content_id TEXT,
+    processing_version TEXT,
+    ingestion_method TEXT,
+    transcript_source TEXT,
     title TEXT NOT NULL DEFAULT 'Untitled',
     summary TEXT DEFAULT '',
     transcript TEXT DEFAULT '',
@@ -51,24 +72,86 @@ CREATE INDEX IF NOT EXISTS idx_reels_category ON reels(category);
 -- Index for subcategory filtering
 CREATE INDEX IF NOT EXISTS idx_reels_subcategory ON reels(subcategory);
 
+CREATE INDEX IF NOT EXISTS idx_reels_normalized_url
+ON reels(normalized_url);
+
+CREATE INDEX IF NOT EXISTS idx_reels_source_identity
+ON reels(user_id, source_platform, source_content_id);
+
 CREATE TABLE IF NOT EXISTS processing_jobs (
     id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
     user_id TEXT NOT NULL,
     url TEXT NOT NULL,
+    normalized_url TEXT,
     source_platform TEXT,
+    source_content_type TEXT,
+    source_content_id TEXT,
+    processing_version TEXT,
+    ingestion_method TEXT,
+    transcript_source TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
     current_step TEXT DEFAULT 'queued',
     progress_percent INTEGER NOT NULL DEFAULT 0,
+    failure_code TEXT,
     error_message TEXT,
     result_reel_id UUID,
     attempt_count INTEGER NOT NULL DEFAULT 0,
     max_attempts INTEGER NOT NULL DEFAULT 3,
+    next_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_by TEXT,
     step_durations JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ
 );
+
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_retry_window
+ON processing_jobs(status, next_retry_at);
+
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_claimed_by
+ON processing_jobs(claimed_by);
+
+CREATE INDEX IF NOT EXISTS idx_processing_jobs_source_identity
+ON processing_jobs(user_id, source_platform, source_content_id);
+
+CREATE TABLE IF NOT EXISTS service_health (
+    service_name TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    details JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS geocode_cache (
+    query_key TEXT PRIMARY KEY,
+    query_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'unknown',
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS processing_cache (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    source_platform TEXT NOT NULL,
+    source_content_id TEXT NOT NULL,
+    source_content_type TEXT DEFAULT '',
+    normalized_url TEXT NOT NULL,
+    processing_version TEXT DEFAULT '',
+    ingestion_method TEXT DEFAULT '',
+    transcript_source TEXT DEFAULT '',
+    transcript TEXT DEFAULT '',
+    caption TEXT DEFAULT '',
+    extracted_data JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(source_platform, source_content_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_processing_cache_source_identity
+ON processing_cache(source_platform, source_content_id);
 """
 
 
@@ -100,11 +183,34 @@ def save_reel(reel_data: dict) -> dict:
         raise
 
 
+def update_reel_fields(reel_id: str, updates: dict) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(TABLE_NAME)
+            .update(updates)
+            .eq("id", reel_id)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Failed to update reel {reel_id}: {e}")
+        raise
+
+
 def create_processing_job(
     *,
     user_id: str,
     url: str,
+    normalized_url: str,
     source_platform: str,
+    source_content_type: str | None,
+    source_content_id: str | None,
+    processing_version: str,
+    ingestion_method: str,
+    transcript_source: str | None = None,
     max_attempts: int,
 ) -> dict:
     client = _get_client()
@@ -113,12 +219,21 @@ def create_processing_job(
             {
                 "user_id": user_id,
                 "url": url,
+                "normalized_url": normalized_url,
                 "source_platform": source_platform,
+                "source_content_type": source_content_type,
+                "source_content_id": source_content_id,
+                "processing_version": processing_version,
+                "ingestion_method": ingestion_method,
+                "transcript_source": transcript_source,
                 "status": ProcessingJobStatus.queued.value,
                 "current_step": "queued",
                 "progress_percent": 0,
+                "failure_code": None,
                 "attempt_count": 0,
                 "max_attempts": max_attempts,
+                "next_retry_at": datetime.now(timezone.utc).isoformat(),
+                "claimed_by": None,
                 "step_durations": {},
             }
         ).execute()
@@ -128,21 +243,237 @@ def create_processing_job(
         raise
 
 
-def claim_next_processing_job() -> dict | None:
+def create_completed_processing_job(
+    *,
+    user_id: str,
+    url: str,
+    normalized_url: str,
+    source_platform: str,
+    source_content_type: str | None,
+    source_content_id: str | None,
+    processing_version: str,
+    ingestion_method: str,
+    transcript_source: str | None,
+    result_reel_id: str,
+    max_attempts: int = 1,
+) -> dict:
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        result = client.table(PROCESSING_JOBS_TABLE).insert(
+            {
+                "user_id": user_id,
+                "url": url,
+                "normalized_url": normalized_url,
+                "source_platform": source_platform,
+                "source_content_type": source_content_type,
+                "source_content_id": source_content_id,
+                "processing_version": processing_version,
+                "ingestion_method": ingestion_method,
+                "transcript_source": transcript_source,
+                "status": ProcessingJobStatus.completed.value,
+                "current_step": "completed",
+                "progress_percent": 100,
+                "failure_code": None,
+                "result_reel_id": result_reel_id,
+                "attempt_count": 0,
+                "max_attempts": max_attempts,
+                "next_retry_at": now,
+                "claimed_by": None,
+                "step_durations": {},
+                "started_at": now,
+                "completed_at": now,
+                "updated_at": now,
+            }
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to create completed processing job: {e}")
+        raise
+
+
+def get_processing_cache_entry(
+    *,
+    source_platform: str,
+    source_content_id: str,
+) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(PROCESSING_CACHE_TABLE)
+            .select("*")
+            .eq("source_platform", source_platform)
+            .eq("source_content_id", source_content_id)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(
+            "Failed to fetch processing cache for %s/%s: %s",
+            source_platform,
+            source_content_id,
+            e,
+        )
+        raise
+
+
+def get_geocode_cache_entry(query_key: str) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(GEOCODE_CACHE_TABLE)
+            .select("*")
+            .eq("query_key", query_key)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch geocode cache for {query_key}: {e}")
+        raise
+
+
+def upsert_geocode_cache_entry(
+    *,
+    query_key: str,
+    query_text: str,
+    status: str,
+    latitude: float | None,
+    longitude: float | None,
+) -> dict:
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        result = client.table(GEOCODE_CACHE_TABLE).upsert(
+            {
+                "query_key": query_key,
+                "query_text": query_text,
+                "status": status,
+                "latitude": latitude,
+                "longitude": longitude,
+                "updated_at": now,
+            },
+            on_conflict="query_key",
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to upsert geocode cache for {query_key}: {e}")
+        raise
+
+
+def upsert_service_health(
+    *,
+    service_name: str,
+    status: str,
+    details: dict | None = None,
+    last_heartbeat_at: str | None = None,
+) -> dict:
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        result = client.table(SERVICE_HEALTH_TABLE).upsert(
+            {
+                "service_name": service_name,
+                "status": status,
+                "details": details or {},
+                "last_heartbeat_at": last_heartbeat_at or now,
+                "updated_at": now,
+            },
+            on_conflict="service_name",
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error(f"Failed to upsert service health for {service_name}: {e}")
+        raise
+
+
+def get_service_health(service_name: str) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(SERVICE_HEALTH_TABLE)
+            .select("*")
+            .eq("service_name", service_name)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch service health for {service_name}: {e}")
+        raise
+
+
+def upsert_processing_cache_entry(cache_data: dict) -> dict:
+    client = _get_client()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        payload = {
+            **cache_data,
+            "updated_at": now,
+        }
+        result = client.table(PROCESSING_CACHE_TABLE).upsert(
+            payload,
+            on_conflict="source_platform,source_content_id",
+        ).execute()
+        return result.data[0]
+    except Exception as e:
+        logger.error("Failed to upsert processing cache: %s", e)
+        raise
+
+
+def claim_available_processing_jobs(
+    *,
+    worker_id: str,
+    max_jobs: int,
+    platform_limits: dict[str, int],
+) -> list[dict]:
     client = _get_client()
     settings = get_settings()
 
     try:
-        result = (
+        queued_result = (
             client.table(PROCESSING_JOBS_TABLE)
             .select("*")
             .eq("status", ProcessingJobStatus.queued.value)
+            .lte("next_retry_at", datetime.now(timezone.utc).isoformat())
+            .order("next_retry_at")
             .order("created_at")
-            .limit(settings.JOB_FETCH_LIMIT)
+            .limit(max(settings.JOB_FETCH_LIMIT, max_jobs * 6))
             .execute()
         )
 
-        for job in result.data:
+        processing_result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("status", ProcessingJobStatus.processing.value)
+            .limit(200)
+            .execute()
+        )
+
+        platform_counts = active_platform_counts(processing_result.data)
+        source_keys = active_source_keys(processing_result.data)
+        claimed_jobs: list[dict] = []
+
+        for job in queued_result.data:
+            if len(claimed_jobs) >= max_jobs:
+                break
+
+            if not can_claim_job(
+                job,
+                current_platform_counts=platform_counts,
+                current_source_keys=source_keys,
+                platform_limits=platform_limits,
+            ):
+                continue
+
             now = datetime.now(timezone.utc).isoformat()
             attempt_count = int(job.get("attempt_count", 0) or 0) + 1
             claimed = (
@@ -155,7 +486,10 @@ def claim_next_processing_job() -> dict | None:
                         "attempt_count": attempt_count,
                         "started_at": now,
                         "completed_at": None,
+                        "failure_code": None,
                         "error_message": None,
+                        "next_retry_at": now,
+                        "claimed_by": worker_id,
                         "updated_at": now,
                     }
                 )
@@ -165,11 +499,17 @@ def claim_next_processing_job() -> dict | None:
             )
 
             if claimed.data:
-                return claimed.data[0]
+                claimed_job = claimed.data[0]
+                claimed_jobs.append(claimed_job)
+                platform = str(claimed_job.get("source_platform") or "web").strip() or "web"
+                platform_counts[platform] = platform_counts.get(platform, 0) + 1
+                source_key = job_source_key(claimed_job)
+                if source_key:
+                    source_keys.add(source_key)
 
-        return None
+        return claimed_jobs
     except Exception as e:
-        logger.error(f"Failed to claim next processing job: {e}")
+        logger.error(f"Failed to claim processing jobs: {e}")
         raise
 
 
@@ -192,6 +532,36 @@ def update_processing_job(job_id: str, updates: dict) -> dict:
         raise
 
 
+def update_processing_job_if_claimed(
+    *,
+    job_id: str,
+    claimed_by: str,
+    updates: dict,
+) -> dict | None:
+    client = _get_client()
+    try:
+        payload = {
+            **updates,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .update(payload)
+            .eq("id", job_id)
+            .eq("claimed_by", claimed_by)
+            .eq("status", ProcessingJobStatus.processing.value)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(
+            f"Failed to update claimed processing job {job_id} for {claimed_by}: {e}"
+        )
+        raise
+
+
 def get_processing_job(job_id: str) -> dict | None:
     client = _get_client()
     try:
@@ -206,6 +576,122 @@ def get_processing_job(job_id: str) -> dict | None:
         return None
     except Exception as e:
         logger.error(f"Failed to fetch processing job {job_id}: {e}")
+        raise
+
+
+def count_processing_jobs_since(
+    *,
+    user_id: str,
+    since_iso: str,
+) -> int:
+    client = _get_client()
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .gte("created_at", since_iso)
+            .limit(1)
+            .execute()
+        )
+        return int(result.count or 0)
+    except Exception as e:
+        logger.error(f"Failed to count recent processing jobs for {user_id}: {e}")
+        raise
+
+
+def count_processing_jobs_by_status_for_user(
+    *,
+    user_id: str,
+    statuses: list[str],
+) -> int:
+    client = _get_client()
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("id", count="exact")
+            .eq("user_id", user_id)
+            .in_("status", statuses)
+            .limit(1)
+            .execute()
+        )
+        return int(result.count or 0)
+    except Exception as e:
+        logger.error(f"Failed to count processing jobs by status for {user_id}: {e}")
+        raise
+
+
+def find_processing_job_by_user_and_url(
+    *,
+    user_id: str,
+    url: str,
+    statuses: list[str] | None = None,
+) -> dict | None:
+    client = _get_client()
+    try:
+        query = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("url", url)
+            .order("created_at", desc=True)
+            .limit(1)
+        )
+        if statuses:
+            query = query.in_("status", statuses)
+
+        result = query.execute()
+        if result.data:
+            return result.data[0]
+
+        query = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(URL_MATCH_FALLBACK_LIMIT)
+        )
+        if statuses:
+            query = query.in_("status", statuses)
+
+        fallback_result = query.execute()
+        return _find_normalized_url_match(fallback_result.data, url)
+    except Exception as e:
+        logger.error(f"Failed to find processing job for {user_id}: {e}")
+        raise
+
+
+def find_processing_job_by_user_and_source_identity(
+    *,
+    user_id: str,
+    source_platform: str,
+    source_content_id: str,
+    statuses: list[str] | None = None,
+) -> dict | None:
+    client = _get_client()
+    try:
+        query = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(URL_MATCH_FALLBACK_LIMIT)
+        )
+        if statuses:
+            query = query.in_("status", statuses)
+
+        result = query.execute()
+        return _find_source_identity_match(
+            result.data,
+            source_platform=source_platform,
+            source_content_id=source_content_id,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to find processing job by source identity for %s: %s",
+            user_id,
+            e,
+        )
         raise
 
 
@@ -251,7 +737,10 @@ def recover_stale_processing_jobs(*, stale_job_minutes: int) -> int:
                         "progress_percent": 0,
                         "started_at": None,
                         "completed_at": None,
+                        "failure_code": None,
                         "error_message": "Recovered after a worker interruption.",
+                        "next_retry_at": datetime.now(timezone.utc).isoformat(),
+                        "claimed_by": None,
                         "updated_at": datetime.now(timezone.utc).isoformat(),
                     }
                 )
@@ -301,6 +790,45 @@ def list_processing_jobs(
         raise
 
 
+def get_processing_job_counts_by_status(
+    statuses: list[str],
+) -> dict[str, int]:
+    client = _get_client()
+    counts: dict[str, int] = {}
+
+    try:
+        for status in statuses:
+            result = (
+                client.table(PROCESSING_JOBS_TABLE)
+                .select("id", count="exact")
+                .eq("status", status)
+                .limit(1)
+                .execute()
+            )
+            counts[status] = int(result.count or 0)
+
+        return counts
+    except Exception as e:
+        logger.error(f"Failed to count processing jobs by status: {e}")
+        raise
+
+
+def list_processing_jobs_for_metrics(limit: int = 500) -> list[dict]:
+    client = _get_client()
+    try:
+        result = (
+            client.table(PROCESSING_JOBS_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+    except Exception as e:
+        logger.error(f"Failed to list processing jobs for metrics: {e}")
+        raise
+
+
 def get_reel(reel_id: str) -> dict | None:
     """Fetch a single reel by ID."""
     client = _get_client()
@@ -311,6 +839,65 @@ def get_reel(reel_id: str) -> dict | None:
         return None
     except Exception as e:
         logger.error(f"Failed to fetch reel {reel_id}: {e}")
+        raise
+
+
+def find_reel_by_user_and_url(*, user_id: str, url: str) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(TABLE_NAME)
+            .select("*")
+            .eq("user_id", user_id)
+            .eq("url", url)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0]
+
+        fallback_result = (
+            client.table(TABLE_NAME)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(URL_MATCH_FALLBACK_LIMIT)
+            .execute()
+        )
+        return _find_normalized_url_match(fallback_result.data, url)
+    except Exception as e:
+        logger.error(f"Failed to fetch reel by url for {user_id}: {e}")
+        raise
+
+
+def find_reel_by_user_and_source_identity(
+    *,
+    user_id: str,
+    source_platform: str,
+    source_content_id: str,
+) -> dict | None:
+    client = _get_client()
+    try:
+        result = (
+            client.table(TABLE_NAME)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at", desc=True)
+            .limit(URL_MATCH_FALLBACK_LIMIT)
+            .execute()
+        )
+        return _find_source_identity_match(
+            result.data,
+            source_platform=source_platform,
+            source_content_id=source_content_id,
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to fetch reel by source identity for %s: %s",
+            user_id,
+            e,
+        )
         raise
 
 
@@ -407,3 +994,42 @@ def get_device_push_tokens(user_id: str) -> list[str]:
     except Exception as e:
         logger.error(f"Failed to fetch device push tokens for {user_id}: {e}")
         raise
+
+
+def _find_normalized_url_match(records: list[dict], url: str) -> dict | None:
+    for record in records:
+        try:
+            candidate = normalize_source_url(record.get("url", ""))
+        except Exception:
+            candidate = str(record.get("url", "")).strip()
+
+        if candidate == url:
+            return record
+
+    return None
+
+
+def _find_source_identity_match(
+    records: list[dict],
+    *,
+    source_platform: str,
+    source_content_id: str,
+) -> dict | None:
+    for record in records:
+        try:
+            candidate = normalize_source_url(record.get("url", ""))
+        except Exception:
+            candidate = str(record.get("url", "")).strip()
+
+        try:
+            identity = resolve_source_identity(candidate)
+        except Exception:
+            continue
+
+        if (
+            identity.source_platform == source_platform
+            and identity.source_content_id == source_content_id
+        ):
+            return record
+
+    return None

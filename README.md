@@ -45,7 +45,18 @@ Whenever a user shares an Instagram Reel to the app, the backend executes the fo
    - `GROQ_API_KEY`
    - `PINECONE_API_KEY` & `PINECONE_INDEX_NAME`
    - `GOOGLE_MAPS_API_KEY`
-   - `SUPABASE_URL` & `SUPABASE_KEY`
+   - `SUPABASE_URL` & `SUPABASE_SERVICE_ROLE_KEY`
+
+   For authenticated media downloads, prefer the new active and backup slot envs:
+   - `INSTAGRAM_ACTIVE_COOKIE_DATA_BASE64` or `INSTAGRAM_ACTIVE_COOKIES_FILE`
+   - `INSTAGRAM_BACKUP_COOKIE_DATA_BASE64` or `INSTAGRAM_BACKUP_COOKIES_FILE`
+   - equivalent `YOUTUBE_*`, `TIKTOK_*`, and `YTDLP_*` active and backup vars when needed
+
+   Safe cookie rotation steps:
+   1. Load the new cookie into the backup slot.
+   2. Redeploy and confirm downloads still work.
+   3. Promote the backup value into the active slot.
+   4. Clear the old backup value after the new active slot is stable.
 
 5. **Start the Server:**
    ```bash
@@ -77,7 +88,7 @@ For Railway:
 - worker service must set `SERVICE_MODE=worker`
 - both services need the same environment variables
 - worker polls the `processing_jobs` table directly, so `REDIS_URL` is optional and only kept for older Redis-based deployments
-- worker tuning env vars are `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_RECOVERY_INTERVAL_SECONDS`, and `WORKER_STALE_JOB_MINUTES`
+- worker tuning env vars are `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_RECOVERY_INTERVAL_SECONDS`, `WORKER_HEARTBEAT_INTERVAL_SECONDS`, `WORKER_STALE_JOB_MINUTES`, `WORKER_CONCURRENCY`, `WORKER_INSTAGRAM_CONCURRENCY`, `WORKER_TIKTOK_CONCURRENCY`, `WORKER_YOUTUBE_CONCURRENCY`, and `WORKER_WEB_CONCURRENCY`
 
 ---
 *Built tightly for the ReelPin Flutter application.*

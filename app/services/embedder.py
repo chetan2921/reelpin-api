@@ -66,7 +66,7 @@ def init_pinecone() -> None:
     logger.info("Pinecone initialized successfully")
 
 
-def embed_and_store(reel_id: str, text: str, metadata: dict) -> None:
+def embed_and_store(reel_id: str, text: str, metadata: dict) -> str:
     index = _get_index()
     embedding = _hash_embedding(text)
 
@@ -81,6 +81,7 @@ def embed_and_store(reel_id: str, text: str, metadata: dict) -> None:
 
     index.upsert(vectors=[(reel_id, embedding, flat_metadata)])
     logger.info(f"Stored embedding for reel {reel_id}")
+    return reel_id
 
 
 def search_similar(

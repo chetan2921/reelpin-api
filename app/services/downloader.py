@@ -44,6 +44,14 @@ class DownloadedMedia:
     media_type: str
     media_paths: list[str]
     caption: str = ""
+    cookie_slot_index: int | None = None
+
+
+@dataclass(frozen=True)
+class CookieSlot:
+    index: int
+    label: str
+    file_path: str
 
 
 def download_media(url: str) -> DownloadedMedia:
@@ -56,14 +64,16 @@ def download_media(url: str) -> DownloadedMedia:
     download_dir = settings.TEMP_DOWNLOAD_DIR
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
-    temp_cookie_file = _build_cookie_file_from_env(url)
+    cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
+    selected_cookie_slot = cookie_slots[0] if cookie_slots else None
     instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
-    instagram_cookie_file = temp_cookie_file or settings.INSTAGRAM_COOKIES_FILE
+    instagram_cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
     instagram_cookie_header = (
         _build_cookie_header(instagram_cookie_file, "instagram.com")
         if _is_instagram_url(url)
         else None
     )
+    cookie_slot_index = selected_cookie_slot.index if selected_cookie_slot else None
 
     output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
     ydl_opts = {
@@ -76,9 +86,14 @@ def download_media(url: str) -> DownloadedMedia:
         "noplaylist": True,
     }
 
-    cookie_file = instagram_cookie_file
+    cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
     if cookie_file:
         ydl_opts["cookiefile"] = cookie_file
+        logger.info(
+            "Using %s cookie slot %s for download",
+            _platform_name(url),
+            selected_cookie_slot.label if selected_cookie_slot else "none",
+        )
 
     if settings.YTDLP_COOKIES_FROM_BROWSER:
         ydl_opts["cookiesfrombrowser"] = (settings.YTDLP_COOKIES_FROM_BROWSER,)
@@ -93,6 +108,7 @@ def download_media(url: str) -> DownloadedMedia:
                         cookie_header=instagram_cookie_header,
                     )
                     if api_media is not None:
+                        api_media.cookie_slot_index = cookie_slot_index
                         return api_media
                 except Exception as e:
                     logger.warning("Authenticated Instagram API fetch failed: %s", e)
@@ -103,8 +119,10 @@ def download_media(url: str) -> DownloadedMedia:
                     cookie_header=instagram_cookie_header,
                 )
                 if public_media.media_type == "image":
+                    public_media.cookie_slot_index = cookie_slot_index
                     return public_media
                 if instagram_kind != "post":
+                    public_media.cookie_slot_index = cookie_slot_index
                     return public_media
             except Exception as e:
                 public_instagram_error = str(e)
@@ -126,6 +144,7 @@ def download_media(url: str) -> DownloadedMedia:
                 media_type="video",
                 media_paths=[downloaded_file],
                 caption=caption,
+                cookie_slot_index=cookie_slot_index,
             )
 
     except yt_dlp.utils.DownloadError as e:
@@ -141,7 +160,7 @@ def download_media(url: str) -> DownloadedMedia:
         logger.error("Unexpected download error: %s", e)
         raise
     finally:
-        if temp_cookie_file:
+        for temp_cookie_file in temp_cookie_files:
             cleanup_file(temp_cookie_file)
 
 
@@ -200,6 +219,7 @@ def _download_public_instagram_media(
             media_type="video",
             media_paths=[destination],
             caption=caption,
+            cookie_slot_index=None,
         )
 
     if image_urls and (len(image_urls) > 1 or not video_url):
@@ -220,6 +240,7 @@ def _download_public_instagram_media(
             media_type="image",
             media_paths=image_paths,
             caption=caption,
+            cookie_slot_index=None,
         )
 
     if video_url:
@@ -229,6 +250,7 @@ def _download_public_instagram_media(
             media_type="video",
             media_paths=[destination],
             caption=caption,
+            cookie_slot_index=None,
         )
 
     raise Exception("Instagram did not expose a public media URL for this page.")
@@ -280,6 +302,7 @@ def _download_authenticated_instagram_media(
                 media_type="image",
                 media_paths=image_paths,
                 caption=caption,
+                cookie_slot_index=None,
             )
 
     image_paths = _download_instagram_image_entries(
@@ -292,6 +315,7 @@ def _download_authenticated_instagram_media(
             media_type="image",
             media_paths=image_paths,
             caption=caption,
+            cookie_slot_index=None,
         )
 
     video_versions = item.get("video_versions") or []
@@ -312,6 +336,7 @@ def _download_authenticated_instagram_media(
                 media_type="video",
                 media_paths=[destination],
                 caption=caption,
+                cookie_slot_index=None,
             )
 
     return None
@@ -389,25 +414,113 @@ def _friendly_download_error(
     )
 
 
-def _build_cookie_file_from_env(url: str) -> str | None:
+def _build_cookie_slots_from_env(url: str) -> tuple[list[CookieSlot], list[str]]:
     settings = get_settings()
     platform = _platform_key(url)
-    raw_cookies = _decode_cookie_blob(
-        encoded=_platform_cookie_value(settings, platform, encoded=True),
-        plain=_platform_cookie_value(settings, platform, encoded=False),
-        encoded_label=f"{platform.upper()}_COOKIE_DATA_BASE64",
-    )
+    temp_files: list[str] = []
+    slots: list[CookieSlot] = []
 
-    if not raw_cookies:
-        raw_cookies = _decode_cookie_blob(
-            encoded=settings.YTDLP_COOKIE_DATA_BASE64,
-            plain=settings.YTDLP_COOKIE_DATA,
-            encoded_label="YTDLP_COOKIE_DATA_BASE64",
+    for index, label in enumerate(["active", "backup"], start=1):
+        slot = _build_cookie_slot(
+            settings,
+            platform=platform,
+            label=label,
+            index=index,
+            temp_files=temp_files,
         )
+        if slot:
+            slots.append(slot)
+
+    if not slots:
+        legacy_slot = _build_legacy_cookie_slot(
+            settings,
+            platform=platform,
+            temp_files=temp_files,
+        )
+        if legacy_slot:
+            slots.append(legacy_slot)
+
+    return slots, temp_files
+
+
+def _build_cookie_slot(
+    settings,
+    *,
+    platform: str,
+    label: str,
+    index: int,
+    temp_files: list[str],
+) -> CookieSlot | None:
+    file_value = _slot_cookie_file_value(settings, platform, label)
+    if file_value:
+        return CookieSlot(index=index, label=label, file_path=file_value)
+
+    raw_cookies = _slot_cookie_blob_value(settings, platform, label)
+    if not raw_cookies and platform != "ytdlp":
+        raw_cookies = _slot_cookie_blob_value(settings, "ytdlp", label)
 
     if not raw_cookies:
         return None
 
+    file_path = _write_cookie_blob_to_temp_file(raw_cookies)
+    temp_files.append(file_path)
+    return CookieSlot(index=index, label=label, file_path=file_path)
+
+
+def _build_legacy_cookie_slot(settings, *, platform: str, temp_files: list[str]) -> CookieSlot | None:
+    legacy_file = _legacy_cookie_file_value(settings, platform)
+    if legacy_file:
+        return CookieSlot(index=1, label="legacy", file_path=legacy_file)
+
+    raw_cookies = _legacy_cookie_blob_value(settings, platform)
+    if not raw_cookies and platform != "ytdlp":
+        raw_cookies = _legacy_cookie_blob_value(settings, "ytdlp")
+
+    if not raw_cookies:
+        return None
+
+    file_path = _write_cookie_blob_to_temp_file(raw_cookies)
+    temp_files.append(file_path)
+    return CookieSlot(index=1, label="legacy", file_path=file_path)
+
+
+def _slot_cookie_file_value(settings, platform: str, label: str) -> str | None:
+    attr_name = f"{platform.upper()}_{label.upper()}_COOKIES_FILE"
+    return getattr(settings, attr_name, None)
+
+
+def _slot_cookie_blob_value(settings, platform: str, label: str) -> str | None:
+    attr_prefix = f"{platform.upper()}_{label.upper()}_COOKIE_DATA"
+    try:
+        return _decode_cookie_blob(
+            encoded=getattr(settings, f"{attr_prefix}_BASE64", None),
+            plain=getattr(settings, attr_prefix, None),
+            encoded_label=f"{attr_prefix}_BASE64",
+        )
+    except Exception as e:
+        logger.warning("%s %s cookie slot is invalid: %s", platform, label, e)
+        return None
+
+
+def _legacy_cookie_file_value(settings, platform: str) -> str | None:
+    if platform == "instagram":
+        return settings.INSTAGRAM_COOKIES_FILE
+    return None
+
+
+def _legacy_cookie_blob_value(settings, platform: str) -> str | None:
+    try:
+        return _decode_cookie_blob(
+            encoded=getattr(settings, f"{platform.upper()}_COOKIE_DATA_BASE64", None),
+            plain=getattr(settings, f"{platform.upper()}_COOKIE_DATA", None),
+            encoded_label=f"{platform.upper()}_COOKIE_DATA_BASE64",
+        )
+    except Exception as e:
+        logger.warning("Legacy %s cookie data is invalid: %s", platform, e)
+        return None
+
+
+def _write_cookie_blob_to_temp_file(raw_cookies: str) -> str:
     with tempfile.NamedTemporaryFile(
         mode="w",
         delete=False,
@@ -417,11 +530,6 @@ def _build_cookie_file_from_env(url: str) -> str | None:
     ) as tmp:
         tmp.write(raw_cookies)
         return tmp.name
-
-
-def _platform_cookie_value(settings, platform: str, *, encoded: bool) -> str | None:
-    attr_name = f"{platform.upper()}_COOKIE_DATA_BASE64" if encoded else f"{platform.upper()}_COOKIE_DATA"
-    return getattr(settings, attr_name, None)
 
 
 def _decode_cookie_blob(*, encoded: str | None, plain: str | None, encoded_label: str) -> str | None:
@@ -611,7 +719,7 @@ def _build_cookie_header(cookie_file: str | None, domain_suffix: str) -> str | N
 
                 cookies.append(f"{name}={value}")
     except OSError as e:
-        logger.warning("Failed to parse cookie file %s: %s", cookie_file, e)
+        logger.warning("Failed to parse configured cookie file for %s: %s", domain_suffix, e)
         return None
 
     if not cookies:
