@@ -1,4 +1,5 @@
 import base64
+import gzip
 import html
 import json
 import logging
@@ -597,7 +598,10 @@ def _write_cookie_blob_to_temp_file(raw_cookies: str) -> str:
 def _decode_cookie_blob(*, encoded: str | None, plain: str | None, encoded_label: str) -> str | None:
     if encoded:
         try:
-            return base64.b64decode(encoded.encode("utf-8")).decode("utf-8")
+            decoded_bytes = base64.b64decode(encoded.encode("utf-8"))
+            if decoded_bytes[:2] == b"\x1f\x8b":
+                decoded_bytes = gzip.decompress(decoded_bytes)
+            return decoded_bytes.decode("utf-8")
         except Exception as e:
             raise Exception(f"{encoded_label} could not be decoded.") from e
     if plain:
@@ -619,7 +623,7 @@ def _platform_key(url: str) -> str:
 def _preferred_download_format(url: str) -> str:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     if "youtube" in host or "youtu.be" in host:
-        return "bestaudio[ext=m4a]/bestaudio/best[height<=360]/best"
+        return "bestaudio/best"
     if "instagram" in host or "tiktok" in host:
         return "bestaudio/best[height<=360]/best"
     return "bestaudio/best"
