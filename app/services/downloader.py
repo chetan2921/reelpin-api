@@ -65,100 +65,140 @@ def download_media(url: str) -> DownloadedMedia:
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
     cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
-    selected_cookie_slot = cookie_slots[0] if cookie_slots else None
-    instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
-    instagram_cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
-    instagram_cookie_header = (
-        _build_cookie_header(instagram_cookie_file, "instagram.com")
-        if _is_instagram_url(url)
-        else None
-    )
-    cookie_slot_index = selected_cookie_slot.index if selected_cookie_slot else None
+    candidate_slots: list[CookieSlot | None] = list(cookie_slots)
+    if not candidate_slots:
+        candidate_slots = [None]
+    elif not _is_instagram_url(url):
+        candidate_slots.append(None)
 
-    output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
-    ydl_opts = {
-        "outtmpl": output_path,
-        "format": _preferred_download_format(url),
-        "quiet": True,
-        "no_warnings": True,
-        "postprocessors": [],
-        "http_headers": _BROWSER_HEADERS,
-        "noplaylist": True,
-    }
-
-    cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
-    if cookie_file:
-        ydl_opts["cookiefile"] = cookie_file
-        logger.info(
-            "Using %s cookie slot %s for download",
-            _platform_name(url),
-            selected_cookie_slot.label if selected_cookie_slot else "none",
-        )
-
-    if settings.YTDLP_COOKIES_FROM_BROWSER:
-        ydl_opts["cookiesfrombrowser"] = (settings.YTDLP_COOKIES_FROM_BROWSER,)
+    last_error: Exception | None = None
 
     try:
-        if _is_instagram_url(url):
-            if instagram_cookie_header:
-                try:
-                    api_media = _download_authenticated_instagram_media(
-                        url,
-                        download_dir,
-                        cookie_header=instagram_cookie_header,
-                    )
-                    if api_media is not None:
-                        api_media.cookie_slot_index = cookie_slot_index
-                        return api_media
-                except Exception as e:
-                    logger.warning("Authenticated Instagram API fetch failed: %s", e)
+        for candidate_index, selected_cookie_slot in enumerate(candidate_slots):
+            instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
+            cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
+            instagram_cookie_header = (
+                _build_cookie_header(cookie_file, "instagram.com")
+                if _is_instagram_url(url) and cookie_file
+                else None
+            )
+            cookie_slot_index = selected_cookie_slot.index if selected_cookie_slot else None
+
+            output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
+            ydl_opts = {
+                "outtmpl": output_path,
+                "format": _preferred_download_format(url),
+                "quiet": True,
+                "no_warnings": True,
+                "postprocessors": [],
+                "http_headers": _BROWSER_HEADERS,
+                "noplaylist": True,
+            }
+
+            if cookie_file:
+                ydl_opts["cookiefile"] = cookie_file
+                logger.info(
+                    "Using %s cookie slot %s for download",
+                    _platform_name(url),
+                    selected_cookie_slot.label if selected_cookie_slot else "none",
+                )
+
+            if settings.YTDLP_COOKIES_FROM_BROWSER:
+                ydl_opts["cookiesfrombrowser"] = (settings.YTDLP_COOKIES_FROM_BROWSER,)
+
             try:
-                public_media = _download_public_instagram_media(
-                    url,
-                    download_dir,
-                    cookie_header=instagram_cookie_header,
+                slot_public_instagram_error = None
+                if _is_instagram_url(url):
+                    if instagram_cookie_header:
+                        try:
+                            api_media = _download_authenticated_instagram_media(
+                                url,
+                                download_dir,
+                                cookie_header=instagram_cookie_header,
+                            )
+                            if api_media is not None:
+                                api_media.cookie_slot_index = cookie_slot_index
+                                return api_media
+                        except Exception as e:
+                            if _should_try_next_cookie(str(e), has_more_slots=candidate_index < len(candidate_slots) - 1):
+                                logger.warning(
+                                    "Authenticated Instagram API fetch failed for cookie slot %s: %s",
+                                    selected_cookie_slot.label if selected_cookie_slot else "none",
+                                    e,
+                                )
+                                last_error = Exception(str(e))
+                                continue
+                            logger.warning("Authenticated Instagram API fetch failed: %s", e)
+                    try:
+                        public_media = _download_public_instagram_media(
+                            url,
+                            download_dir,
+                            cookie_header=instagram_cookie_header,
+                        )
+                        if public_media.media_type == "image":
+                            public_media.cookie_slot_index = cookie_slot_index
+                            return public_media
+                        if instagram_kind != "post":
+                            public_media.cookie_slot_index = cookie_slot_index
+                            return public_media
+                    except Exception as e:
+                        slot_public_instagram_error = str(e)
+                        logger.warning("Public Instagram fetch failed: %s", e)
+                        if _should_try_next_cookie(slot_public_instagram_error, has_more_slots=candidate_index < len(candidate_slots) - 1):
+                            last_error = Exception(slot_public_instagram_error)
+                            continue
+
+                logger.info("Downloading media from: %s", url)
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    downloaded_file = ydl.prepare_filename(info)
+
+                    if not os.path.exists(downloaded_file):
+                        raise FileNotFoundError(
+                            f"Download completed but file not found at {downloaded_file}"
+                        )
+
+                    caption = str(info.get("description") or "")
+                    logger.info("Downloaded media to: %s", downloaded_file)
+                    return DownloadedMedia(
+                        media_type="video",
+                        media_paths=[downloaded_file],
+                        caption=caption,
+                        cookie_slot_index=cookie_slot_index,
+                    )
+
+            except yt_dlp.utils.DownloadError as e:
+                logger.error("yt-dlp download error: %s", e)
+                friendly_error = _friendly_download_error(
+                    url=url,
+                    raw_message=str(e),
+                    public_instagram_error=slot_public_instagram_error if _is_instagram_url(url) else None,
                 )
-                if public_media.media_type == "image":
-                    public_media.cookie_slot_index = cookie_slot_index
-                    return public_media
-                if instagram_kind != "post":
-                    public_media.cookie_slot_index = cookie_slot_index
-                    return public_media
+                if _should_try_next_cookie(
+                    friendly_error,
+                    has_more_slots=candidate_index < len(candidate_slots) - 1,
+                ):
+                    logger.warning(
+                        "Cookie slot %s failed for %s, trying next slot",
+                        selected_cookie_slot.label if selected_cookie_slot else "anonymous",
+                        _platform_name(url),
+                    )
+                    last_error = Exception(friendly_error)
+                    continue
+                raise Exception(friendly_error)
             except Exception as e:
-                public_instagram_error = str(e)
-                logger.warning("Public Instagram fetch failed: %s", e)
+                logger.error("Unexpected download error: %s", e)
+                if _should_try_next_cookie(
+                    str(e),
+                    has_more_slots=candidate_index < len(candidate_slots) - 1,
+                ):
+                    last_error = e
+                    continue
+                raise
 
-        logger.info("Downloading media from: %s", url)
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            downloaded_file = ydl.prepare_filename(info)
-
-            if not os.path.exists(downloaded_file):
-                raise FileNotFoundError(
-                    f"Download completed but file not found at {downloaded_file}"
-                )
-
-            caption = str(info.get("description") or "")
-            logger.info("Downloaded media to: %s", downloaded_file)
-            return DownloadedMedia(
-                media_type="video",
-                media_paths=[downloaded_file],
-                caption=caption,
-                cookie_slot_index=cookie_slot_index,
-            )
-
-    except yt_dlp.utils.DownloadError as e:
-        logger.error("yt-dlp download error: %s", e)
-        raise Exception(
-            _friendly_download_error(
-                url=url,
-                raw_message=str(e),
-                public_instagram_error=public_instagram_error,
-            )
-        )
-    except Exception as e:
-        logger.error("Unexpected download error: %s", e)
-        raise
+        if last_error:
+            raise last_error
+        raise Exception("Download failed without a specific error.")
     finally:
         for temp_cookie_file in temp_cookie_files:
             cleanup_file(temp_cookie_file)
@@ -412,6 +452,28 @@ def _friendly_download_error(
         f"Failed to download this media from {platform}. "
         "It may be private, unavailable, or temporarily blocked."
     )
+
+
+def _should_try_next_cookie(message: str, *, has_more_slots: bool) -> bool:
+    if not has_more_slots:
+        return False
+
+    lowered = message.lower()
+    retry_patterns = [
+        "login required",
+        "authenticated cookies",
+        "blocked anonymous download",
+        "fresh authenticated session",
+        "cookie",
+        "cookies",
+        "unauthorized",
+        "forbidden",
+        "429",
+        "rate limit",
+        "rate-limit",
+        "too many requests",
+    ]
+    return any(pattern in lowered for pattern in retry_patterns)
 
 
 def _build_cookie_slots_from_env(url: str) -> tuple[list[CookieSlot], list[str]]:
