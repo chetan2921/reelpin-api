@@ -91,44 +91,46 @@ def _prepare_instagram_post(source: SourceIdentity, *, mark) -> PreparedPlatform
 
 
 def _prepare_youtube_short(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    from app.services.youtube_transcripts import fetch_youtube_transcript
-
-    mark("downloading", 12)
-    started = perf_counter()
-    transcript_text, caption = fetch_youtube_transcript(source.normalized_url)
-    download_seconds = round(perf_counter() - started, 3)
-    mark("transcribing", 36)
+    downloaded, download_seconds = _download_platform_media(source, mark=mark)
+    if downloaded.media_type == "image":
+        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
+        transcript_source = "groq_vision_ocr"
+    else:
+        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
+        transcript_source = "groq_whisper"
     return PreparedPlatformContent(
         transcript_text=transcript_text,
-        caption=caption,
-        media_paths=[],
+        caption=downloaded.caption,
+        media_paths=downloaded.media_paths,
         ingestion_method="youtube_short_pipeline",
-        transcript_source="youtube_transcript_api",
+        transcript_source=transcript_source,
         step_durations={
             "download_seconds": download_seconds,
-            "transcribe_seconds": 0.0,
+            "transcribe_seconds": second_step_seconds,
         },
+        cookie_slot_index=downloaded.cookie_slot_index,
     )
 
 
 def _prepare_youtube_video(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    from app.services.youtube_transcripts import fetch_youtube_transcript
-
-    mark("downloading", 12)
-    started = perf_counter()
-    transcript_text, caption = fetch_youtube_transcript(source.normalized_url)
-    download_seconds = round(perf_counter() - started, 3)
-    mark("transcribing", 36)
+    downloaded, download_seconds = _download_platform_media(source, mark=mark)
+    if downloaded.media_type == "image":
+        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
+        transcript_source = "groq_vision_ocr"
+    else:
+        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
+        transcript_source = "groq_whisper"
     return PreparedPlatformContent(
         transcript_text=transcript_text,
-        caption=caption,
-        media_paths=[],
+        caption=downloaded.caption,
+        media_paths=downloaded.media_paths,
         ingestion_method="youtube_video_pipeline",
-        transcript_source="youtube_transcript_api",
+        transcript_source=transcript_source,
         step_durations={
             "download_seconds": download_seconds,
-            "transcribe_seconds": 0.0,
+            "transcribe_seconds": second_step_seconds,
         },
+        cookie_slot_index=downloaded.cookie_slot_index,
     )
 
 
