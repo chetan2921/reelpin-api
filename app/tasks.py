@@ -19,6 +19,7 @@ from app.services.database import (
     update_processing_job_if_claimed,
     upsert_service_health,
 )
+from app.services.completion_notifications import send_reel_ready_notification
 from app.services.failures import classify_processing_failure
 from app.services.observability import log_processing_event
 from app.services.queue_control import job_source_key
@@ -187,6 +188,12 @@ def process_reel_job(job: dict, *, worker_id: str) -> None:
             duration_seconds=total_duration,
             extra={"step_durations": step_durations, "result_reel_id": reel.id},
         )
+        _notify_reel_ready(
+            user_id=job["user_id"],
+            reel_id=reel.id,
+            job_id=job_id,
+            reel_title=reel.title,
+        )
     except JobClaimLostError as e:
         logger.warning(str(e))
         log_processing_event(
@@ -270,6 +277,33 @@ def _persist_progress_update(
         raise JobClaimLostError(
             f"Processing job {job_id} progress update lost ownership for worker {state['worker_id']}."
         )
+
+
+def _notify_reel_ready(
+    *,
+    user_id: str,
+    reel_id: str,
+    job_id: str,
+    reel_title: str | None,
+) -> None:
+    try:
+        delivered = send_reel_ready_notification(
+            user_id=user_id,
+            reel_id=reel_id,
+            job_id=job_id,
+            reel_title=reel_title,
+        )
+        log_processing_event(
+            logger,
+            "worker.processing_job.notification_sent",
+            job_id=job_id,
+            user_id=user_id,
+            processing_step="completed",
+            status="notification_sent",
+            extra={"delivered_device_count": delivered, "result_reel_id": reel_id},
+        )
+    except Exception as e:
+        logger.warning("Completion push skipped for job %s: %s", job_id, e)
 
 
 def _progress_update(*, step: str, progress: int, extra: dict, state: dict) -> dict:
