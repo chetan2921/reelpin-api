@@ -66,7 +66,14 @@ def download_media(url: str) -> DownloadedMedia:
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
     cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
-    candidate_slots: list[CookieSlot | None] = list(cookie_slots)
+    candidate_slots: list[CookieSlot | None] = []
+    if _is_instagram_url(url):
+        candidate_slots.append(None)
+        if settings.YTDLP_COOKIES_FROM_BROWSER:
+            candidate_slots.append(None)
+        candidate_slots.extend(cookie_slots)
+    else:
+        candidate_slots = list(cookie_slots)
     if not candidate_slots:
         candidate_slots = [None]
     elif not _is_instagram_url(url):
@@ -76,7 +83,6 @@ def download_media(url: str) -> DownloadedMedia:
 
     try:
         for candidate_index, selected_cookie_slot in enumerate(candidate_slots):
-            instagram_kind = _instagram_path_kind(url) if _is_instagram_url(url) else "unknown"
             cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
             instagram_cookie_header = (
                 _build_cookie_header(cookie_file, "instagram.com")
@@ -104,7 +110,17 @@ def download_media(url: str) -> DownloadedMedia:
                     selected_cookie_slot.label if selected_cookie_slot else "none",
                 )
 
-            if settings.YTDLP_COOKIES_FROM_BROWSER:
+            use_browser_cookies = (
+                settings.YTDLP_COOKIES_FROM_BROWSER
+                if (not _is_instagram_url(url) and selected_cookie_slot is None)
+                or (_is_instagram_url(url) and candidate_index == 1)
+                else None
+            )
+            is_cookie_free_instagram_attempt = (
+                _is_instagram_url(url)
+                and selected_cookie_slot is None
+            )
+            if use_browser_cookies:
                 ydl_opts["cookiesfrombrowser"] = (settings.YTDLP_COOKIES_FROM_BROWSER,)
 
             try:
@@ -136,15 +152,14 @@ def download_media(url: str) -> DownloadedMedia:
                             download_dir,
                             cookie_header=instagram_cookie_header,
                         )
-                        if public_media.media_type == "image":
-                            public_media.cookie_slot_index = cookie_slot_index
-                            return public_media
-                        if instagram_kind != "post":
-                            public_media.cookie_slot_index = cookie_slot_index
-                            return public_media
+                        public_media.cookie_slot_index = cookie_slot_index
+                        return public_media
                     except Exception as e:
                         slot_public_instagram_error = str(e)
                         logger.warning("Public Instagram fetch failed: %s", e)
+                        if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
+                            last_error = Exception(slot_public_instagram_error)
+                            continue
                         if _should_try_next_cookie(slot_public_instagram_error, has_more_slots=candidate_index < len(candidate_slots) - 1):
                             last_error = Exception(slot_public_instagram_error)
                             continue
@@ -175,6 +190,9 @@ def download_media(url: str) -> DownloadedMedia:
                     raw_message=str(e),
                     public_instagram_error=slot_public_instagram_error if _is_instagram_url(url) else None,
                 )
+                if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
+                    last_error = Exception(friendly_error)
+                    continue
                 if _should_try_next_cookie(
                     friendly_error,
                     has_more_slots=candidate_index < len(candidate_slots) - 1,
@@ -189,6 +207,9 @@ def download_media(url: str) -> DownloadedMedia:
                 raise Exception(friendly_error)
             except Exception as e:
                 logger.error("Unexpected download error: %s", e)
+                if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
+                    last_error = e
+                    continue
                 if _should_try_next_cookie(
                     str(e),
                     has_more_slots=candidate_index < len(candidate_slots) - 1,
