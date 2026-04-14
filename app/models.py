@@ -199,3 +199,23 @@ class ApiErrorResponse(BaseModel):
     message: str
     detail: str
     retryable: bool = False
+
+
+class DashboardOverviewResponse(BaseModel):
+    checked_at: str
+    registered_profile_count: Optional[int] = None
+    registered_device_count: int = 0
+    registered_device_user_count: int = 0
+    saved_reel_count: int = 0
+    processing_job_count: int = 0
+    active_job_count: int = 0
+    completed_job_count: int = 0
+    failed_job_count: int = 0
+    dead_lettered_job_count: int = 0
+    reels_saved_last_24h: int = 0
+    jobs_created_last_24h: int = 0
+    exact_download_count: Optional[int] = None
+    exact_download_source: str = ""
+    processing_metrics: dict[str, Any] = Field(default_factory=dict)
+    health: dict[str, Any] = Field(default_factory=dict)
+    instagram_cookie_health: list[dict[str, Any]] = Field(default_factory=list)

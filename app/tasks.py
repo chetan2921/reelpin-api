@@ -24,6 +24,7 @@ from app.services.failures import classify_processing_failure
 from app.services.observability import log_processing_event
 from app.services.queue_control import job_source_key
 from app.services.retry_policy import build_retry_decision
+from app.services.ops_alerts import maybe_send_instagram_cookie_alert
 from app.services.security import (
     build_secret_configuration_summary,
     configure_secure_logging,
@@ -439,6 +440,7 @@ def run_worker() -> None:
                             **_worker_heartbeat_details(active_futures),
                         },
                     )
+                    maybe_send_instagram_cookie_alert(settings)
                     last_heartbeat_at = now
 
                 if now - last_recovery_at >= settings.WORKER_RECOVERY_INTERVAL_SECONDS:

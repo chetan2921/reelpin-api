@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -19,6 +20,8 @@ import yt_dlp
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+_instagram_cookie_rotation = 0
+_instagram_cookie_rotation_lock = threading.Lock()
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -66,6 +69,7 @@ def download_media(url: str) -> DownloadedMedia:
     os.makedirs(download_dir, exist_ok=True)
     public_instagram_error = None
     cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
+    cookie_slots = _ordered_cookie_slots(url, cookie_slots)
     candidate_slots: list[CookieSlot | None] = []
     if _is_instagram_url(url):
         candidate_slots.append(None)
@@ -504,7 +508,7 @@ def _build_cookie_slots_from_env(url: str) -> tuple[list[CookieSlot], list[str]]
     temp_files: list[str] = []
     slots: list[CookieSlot] = []
 
-    for index, label in enumerate(["active", "backup"], start=1):
+    for index, label in enumerate(["active", "backup", "tertiary"], start=1):
         slot = _build_cookie_slot(
             settings,
             platform=platform,
@@ -590,6 +594,18 @@ def _legacy_cookie_file_value(settings, platform: str) -> str | None:
     if platform == "instagram":
         return settings.INSTAGRAM_COOKIES_FILE
     return None
+
+
+def _ordered_cookie_slots(url: str, slots: list[CookieSlot]) -> list[CookieSlot]:
+    if not _is_instagram_url(url) or len(slots) <= 1:
+        return slots
+
+    with _instagram_cookie_rotation_lock:
+        global _instagram_cookie_rotation
+        start_index = _instagram_cookie_rotation % len(slots)
+        _instagram_cookie_rotation += 1
+
+    return slots[start_index:] + slots[:start_index]
 
 
 def _legacy_cookie_blob_value(settings, platform: str) -> str | None:

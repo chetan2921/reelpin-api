@@ -3,6 +3,8 @@ from pathlib import Path
 import re
 from types import SimpleNamespace
 
+from app.services.cookie_health import inspect_instagram_cookie_slots
+
 
 _SECRET_PATTERNS = [
     (
@@ -59,9 +61,11 @@ def build_secret_configuration_summary(settings) -> dict:
             platform: {
                 "active": has_cookie_slot(settings, platform, "active"),
                 "backup": has_cookie_slot(settings, platform, "backup"),
+                "tertiary": has_cookie_slot(settings, platform, "tertiary"),
             }
             for platform in ["instagram", "youtube", "tiktok", "ytdlp"]
         },
+        "instagram_cookie_health": inspect_instagram_cookie_slots(settings),
         "deprecated_envs_in_use": deprecated_secret_envs(settings),
     }
 
@@ -81,10 +85,16 @@ def secret_configuration_warnings(settings) -> list[str]:
         warnings.append(
             "Legacy secret env names are in use. Prefer the ACTIVE and BACKUP slot env names."
         )
+    for slot in inspect_instagram_cookie_slots(namespace):
+        if slot["warning"]:
+            warnings.append(
+                f"Instagram cookie slot {slot['slot']} warning: {slot['warning']}."
+            )
     for path_env in [
         "FIREBASE_SERVICE_ACCOUNT_PATH",
         "INSTAGRAM_ACTIVE_COOKIES_FILE",
         "INSTAGRAM_BACKUP_COOKIES_FILE",
+        "INSTAGRAM_TERTIARY_COOKIES_FILE",
         "INSTAGRAM_COOKIES_FILE",
     ]:
         path_value = getattr(namespace, path_env, None)

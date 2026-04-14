@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from time import perf_counter
 
 from app.models import HealthResponse, ServiceHealthCheck
+from app.services.cookie_health import inspect_instagram_cookie_slots
 
 def build_live_health_response() -> HealthResponse:
     checked_at = datetime.now(timezone.utc).isoformat()
@@ -33,6 +34,7 @@ def build_readiness_health_response() -> HealthResponse:
         "pinecone": _check_pinecone(checked_at),
         "groq": _check_groq(checked_at),
         "worker_loop": _check_worker_loop(checked_at),
+        "instagram_cookies": _check_instagram_cookies(checked_at),
     }
 
     ready = all(check.healthy for check in checks.values())
@@ -137,6 +139,44 @@ def _check_worker_loop(checked_at: str) -> ServiceHealthCheck:
         checked_at=checked_at,
         stale_after_seconds=settings.HEALTH_WORKER_STALE_SECONDS,
         latency_ms=_latency_ms(started),
+    )
+
+
+def _check_instagram_cookies(checked_at: str) -> ServiceHealthCheck:
+    from app.config import get_settings
+
+    started = perf_counter()
+    slots = inspect_instagram_cookie_slots(get_settings())
+    any_configured = any(slot["configured"] for slot in slots)
+    any_healthy = any(slot["healthy"] for slot in slots)
+
+    if not any_configured:
+        return ServiceHealthCheck(
+            healthy=True,
+            status="ok",
+            latency_ms=_latency_ms(started),
+            checked_at=checked_at,
+            message="No Instagram cookie slots are configured. Public access will be used until cookies are needed.",
+            details={"slots": slots},
+        )
+
+    if any_healthy:
+        return ServiceHealthCheck(
+            healthy=True,
+            status="ok",
+            latency_ms=_latency_ms(started),
+            checked_at=checked_at,
+            message="At least one Instagram cookie slot is healthy.",
+            details={"slots": slots},
+        )
+
+    return ServiceHealthCheck(
+        healthy=False,
+        status="degraded",
+        latency_ms=_latency_ms(started),
+        checked_at=checked_at,
+        message="All configured Instagram cookie slots are unhealthy.",
+        details={"slots": slots},
     )
 
 

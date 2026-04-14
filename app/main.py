@@ -6,12 +6,14 @@ import re
 from datetime import datetime, timedelta, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
+from fastapi import FastAPI, HTTPException, Header, Request, UploadFile, File, Form, Query
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.models import (
+    ApiErrorResponse,
+    DashboardOverviewResponse,
     DevicePushTokenInput,
     EnqueueReelJobInput,
     FailureCode,
@@ -55,6 +57,7 @@ from app.services.health_checks import (
     build_live_health_response,
     build_readiness_health_response,
 )
+from app.services.dashboard import build_dashboard_overview
 from app.services.failures import classify_processing_failure
 from app.services.cost_controls import evaluate_submission_limits
 from app.services.api_responses import (
@@ -500,6 +503,24 @@ async def get_metrics():
         )
 
 
+@app.get("/api/v1/dashboard/overview", response_model=DashboardOverviewResponse)
+async def get_dashboard_overview(
+    x_admin_key: str | None = Header(default=None, alias="X-Admin-Key"),
+):
+    _require_admin_key(x_admin_key)
+    try:
+        return build_dashboard_overview()
+    except Exception as e:
+        logger.error(f"Get dashboard overview failed: {e}")
+        raise ApiResponseError(
+            status_code=500,
+            error_code="dashboard_unavailable",
+            message="The dashboard is not available right now.",
+            detail=str(e),
+            retryable=True,
+        )
+
+
 @app.post("/api/v1/process-video", response_model=ReelResponse)
 async def process_video(
     video: UploadFile = File(...),
@@ -860,6 +881,27 @@ def _enforce_submission_limits(user_id: str) -> None:
         detail=decision.detail or "Submission limit reached.",
         retryable=True,
     )
+
+
+def _require_admin_key(candidate: str | None) -> None:
+    configured = (settings.ADMIN_DASHBOARD_KEY or "").strip()
+    if not configured:
+        raise ApiResponseError(
+            status_code=503,
+            error_code="dashboard_not_configured",
+            message="The admin dashboard is not configured yet.",
+            detail="ADMIN_DASHBOARD_KEY is not set on the backend.",
+            retryable=False,
+        )
+
+    if candidate != configured:
+        raise ApiResponseError(
+            status_code=401,
+            error_code="unauthorized_dashboard_access",
+            message="Admin dashboard authentication failed.",
+            detail="The X-Admin-Key header is missing or invalid.",
+            retryable=False,
+        )
 
 
 def _search_tokens(query: str) -> list[str]:

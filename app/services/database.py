@@ -829,6 +829,63 @@ def list_processing_jobs_for_metrics(limit: int = 500) -> list[dict]:
         raise
 
 
+def count_table_rows(table_name: str) -> int:
+    client = _get_client()
+    try:
+        result = client.table(table_name).select("id", count="exact").limit(1).execute()
+        return int(result.count or 0)
+    except Exception as e:
+        logger.error(f"Failed to count rows for table {table_name}: {e}")
+        raise
+
+
+def count_table_rows_since(
+    *,
+    table_name: str,
+    timestamp_column: str,
+    since_iso: str,
+) -> int:
+    client = _get_client()
+    try:
+        result = (
+            client.table(table_name)
+            .select("id", count="exact")
+            .gte(timestamp_column, since_iso)
+            .limit(1)
+            .execute()
+        )
+        return int(result.count or 0)
+    except Exception as e:
+        logger.error(f"Failed to count rows for table {table_name} since {since_iso}: {e}")
+        raise
+
+
+def list_column_values(
+    *,
+    table_name: str,
+    column_name: str,
+    limit: int = 5000,
+) -> list[str]:
+    client = _get_client()
+    try:
+        result = (
+            client.table(table_name)
+            .select(column_name)
+            .limit(limit)
+            .execute()
+        )
+        values = []
+        for row in result.data:
+            value = row.get(column_name)
+            if value is None:
+                continue
+            values.append(str(value))
+        return values
+    except Exception as e:
+        logger.error(f"Failed to list column {column_name} from table {table_name}: {e}")
+        raise
+
+
 def get_reel(reel_id: str) -> dict | None:
     """Fetch a single reel by ID."""
     client = _get_client()
