@@ -13,6 +13,9 @@ class ProcessingCacheTests(unittest.TestCase):
         extracted = ExtractedData(
             title="Mumbai cafe list",
             summary="A short reel about three cafes in Bandra.",
+            content_domain="Food",
+            content_format="Cafe Guides",
+            topical_tags=["bandra cafes", "mumbai food", "weekend spots"],
             category="Entertainment & Lifestyle",
             subcategory="Food & Restaurants",
             secondary_categories=["Travel & Places"],
@@ -55,6 +58,9 @@ class ProcessingCacheTests(unittest.TestCase):
         self.assertEqual(result.transcript_source, "groq_whisper")
         self.assertEqual(result.transcript, "Best Bandra cafes to try this weekend.")
         self.assertEqual(result.caption, "Three Bandra spots worth saving")
+        self.assertEqual(result.extracted.content_domain, "Food")
+        self.assertEqual(result.extracted.content_format, "Cafe Guides")
+        self.assertEqual(result.extracted.topical_tags, ["bandra cafes", "mumbai food", "weekend spots"])
         self.assertEqual(result.extracted.title, extracted.title)
         self.assertEqual(result.extracted.locations[0].name, "Candies")
 

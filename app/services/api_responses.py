@@ -17,6 +17,7 @@ _STEP_MESSAGES = {
     "transcribing": "Transcribing audio.",
     "ocr": "Reading text from images.",
     "extracting": "Extracting structured details.",
+    "categorizing": "Organizing the reel into your categories.",
     "saving": "Saving the reel.",
     "embedding": "Indexing the reel for search.",
     "completed": "Processing completed.",

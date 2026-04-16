@@ -1,7 +1,7 @@
 from app.services.platform_handlers import platform_handler_key
 from app.services.source_identity import SourceIdentity, resolve_source_identity
 
-PROCESSING_VERSION = "reelpin-v1"
+PROCESSING_VERSION = "reelpin-v2"
 
 
 def build_url_processing_metadata(

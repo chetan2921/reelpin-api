@@ -23,6 +23,8 @@ from app.services.platform_handlers import (
     prepare_content_for_source,
 )
 from app.services.source_identity import resolve_source_identity
+from app.services.transcriber import transcribe_audio
+from app.services.user_categories import assign_user_category
 from app.models import ReelResponse
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,25 @@ async def process_reel_pipeline_with_metrics(
                         e,
                     )
                 step_durations["cache_write_seconds"] = round(perf_counter() - started, 3)
+
+        _mark("categorizing", 68)
+        started = perf_counter()
+        category_assignment = assign_user_category(
+            user_id=user_id,
+            extracted=extracted,
+            transcript=transcript_text,
+            caption=caption,
+            source_platform=processing_metadata["source_platform"] if processing_metadata else source.source_platform,
+            source_content_type=processing_metadata["source_content_type"] if processing_metadata else source.source_content_type,
+        )
+        extracted = extracted.model_copy(
+            update={
+                "category": category_assignment.category,
+                "subcategory": category_assignment.subcategory,
+                "secondary_categories": category_assignment.secondary_categories,
+            }
+        )
+        step_durations["category_seconds"] = round(perf_counter() - started, 3)
 
         _mark("saving", 76)
         started = perf_counter()
@@ -273,6 +294,21 @@ async def process_video_pipeline(
         # Step 2: Extract structured data (no caption extracted from direct uploads currently)
         logger.info("[Pipeline] Step 2/4: Extracting structured data with AI...")
         extracted = extract_structured_data(transcript=transcript_text, caption="(direct upload)")
+        category_assignment = assign_user_category(
+            user_id=user_id,
+            extracted=extracted,
+            transcript=transcript_text,
+            caption="(direct upload)",
+            source_platform=metadata["source_platform"],
+            source_content_type=metadata["source_content_type"],
+        )
+        extracted = extracted.model_copy(
+            update={
+                "category": category_assignment.category,
+                "subcategory": category_assignment.subcategory,
+                "secondary_categories": category_assignment.secondary_categories,
+            }
+        )
 
         # Step 3: Store in database
         logger.info("[Pipeline] Step 3/4: Saving to database...")

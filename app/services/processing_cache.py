@@ -72,6 +72,9 @@ def serialize_extracted_data(extracted: ExtractedData) -> dict:
     return {
         "title": extracted.title,
         "summary": extracted.summary,
+        "content_domain": extracted.content_domain,
+        "content_format": extracted.content_format,
+        "topical_tags": list(extracted.topical_tags),
         "category": extracted.category,
         "subcategory": extracted.subcategory,
         "secondary_categories": list(extracted.secondary_categories),
@@ -100,6 +103,9 @@ def deserialize_extracted_data(payload: dict) -> ExtractedData:
     return ExtractedData(
         title=str(payload.get("title") or ""),
         summary=str(payload.get("summary") or ""),
+        content_domain=str(payload.get("content_domain") or ""),
+        content_format=str(payload.get("content_format") or ""),
+        topical_tags=_string_list(payload.get("topical_tags")),
         category=str(payload.get("category") or "Other"),
         subcategory=str(payload.get("subcategory") or "Other"),
         secondary_categories=_string_list(payload.get("secondary_categories")),

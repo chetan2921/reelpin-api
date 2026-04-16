@@ -958,6 +958,40 @@ def find_reel_by_user_and_source_identity(
         raise
 
 
+def list_user_category_pairs(user_id: str, limit: int = 5000) -> list[dict]:
+    client = _get_client()
+    try:
+        result = (
+            client.table(TABLE_NAME)
+            .select("category,subcategory,secondary_categories,created_at")
+            .eq("user_id", user_id)
+            .order("created_at")
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+    except Exception as e:
+        logger.error(f"Failed to list category pairs for {user_id}: {e}")
+        raise
+
+
+def list_user_reels_for_recategorization(user_id: str, limit: int = 200) -> list[dict]:
+    client = _get_client()
+    try:
+        result = (
+            client.table(TABLE_NAME)
+            .select("*")
+            .eq("user_id", user_id)
+            .order("created_at")
+            .limit(limit)
+            .execute()
+        )
+        return result.data
+    except Exception as e:
+        logger.error(f"Failed to list reels for recategorization for {user_id}: {e}")
+        raise
+
+
 def get_reels(
     user_id: str | None = None,
     category: str | None = None,

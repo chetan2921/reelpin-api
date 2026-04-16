@@ -79,6 +79,9 @@ class ProactiveRecallPushRequest(BaseModel):
 class ExtractedData(BaseModel):
     title: str = ""
     summary: str = ""
+    content_domain: str = ""
+    content_format: str = ""
+    topical_tags: list[str] = Field(default_factory=list)
     category: str = "Other"
     subcategory: str = "Other"
     secondary_categories: list[str] = Field(default_factory=list)
@@ -156,6 +159,29 @@ class SearchResponse(BaseModel):
     query: str
     results: list[SearchResult]
     total: int
+
+
+class ReelCategoryGroup(BaseModel):
+    category: str
+    subcategories: list[str] = Field(default_factory=list)
+
+
+class ReelCategoryFiltersResponse(BaseModel):
+    user_id: str
+    categories: list[ReelCategoryGroup] = Field(default_factory=list)
+    total_categories: int = 0
+
+
+class ReclassifyCategoriesInput(BaseModel):
+    user_id: str = Field(..., description="Authenticated user identifier")
+    limit: int = Field(default=200, ge=1, le=1000, description="Maximum number of saved reels to reclassify")
+
+
+class ReclassifyCategoriesResponse(BaseModel):
+    user_id: str
+    reviewed: int = 0
+    updated: int = 0
+    categories: list[ReelCategoryGroup] = Field(default_factory=list)
 
 
 class ServiceHealthCheck(BaseModel):

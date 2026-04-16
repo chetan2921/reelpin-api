@@ -14,7 +14,7 @@ from app.services.database import (
 
 logger = logging.getLogger(__name__)
 
-EXTRACTION_PROMPT = """You are an AI that analyzes Instagram reel content. Given the transcript (and optional caption), extract structured information.
+EXTRACTION_PROMPT = """You are an AI that analyzes short-form video and image-post content. Given the transcript (and optional caption), extract structured information.
 
 TRANSCRIPT:
 {transcript}
@@ -22,21 +22,13 @@ TRANSCRIPT:
 CAPTION:
 {caption}
 
-TAXONOMY (6 Categories and their associated Subcategories):
-- Entertainment & Lifestyle: Food & Restaurants, Travel & Places, Fitness & Gym, Fashion & Style, Beauty & Skincare, Home Decor & Interior, Relationships & Dating, Motivation & Mindset, Humor & Memes, Spirituality & Religion
-- Knowledge & Learning: Study & Education, Science & Technology, History & Culture, Language Learning, Books & Reading, General Knowledge & Facts
-- Finance & Career: Stock Market & Trading, Personal Finance & Investing, Business & Startups, Career & Jobs, Crypto & Web3, Real Estate
-- Health & Wellness: Mental Health, Nutrition & Diet, Yoga & Meditation, Medical & Health Tips, Parenting & Kids
-- Skills & Hobbies: Cooking & Recipes, Music & Dance, Art & Drawing, Photography & Videography, DIY & Crafts, Gaming, Sports & Cricket, Gardening & Plants, Pets & Animals
-- Practical & Utility: Life Hacks & Tips, Tech & Gadgets, Shopping & Products, Legal & Rights, Government & Schemes, Automotive & Cars
-
 Extract the following as a JSON object:
 {{
     "title": "A concise, descriptive title for this reel (max 10 words)",
     "summary": "A 2-3 sentence summary of what this reel is about",
-    "category": "Exactly ONE primary category string from the 6 broad sections (e.g., 'Entertainment & Lifestyle')",
-    "subcategory": "Exactly ONE specific subcategory string from the matched section (e.g., 'Food & Restaurants')",
-    "secondary_categories": ["Up to 2 secondary subcategories from the taxonomy list above that also apply. Empty array if none."],
+    "content_domain": "A broad natural language domain like Movies, Fitness, Food, Travel, Personal Finance, Tech, Fashion, Cricket, News, TV & Series",
+    "content_format": "A reusable content type like Trailers, Reviews, Scenes, Recipes, Workout Tips, Match Highlights, Product Reviews, News Updates, Tutorials",
+    "topical_tags": ["3 to 6 concise topic tags that capture specific themes, subjects, or entities mentioned"],
     "key_facts": ["List of specific facts, tips, or pieces of information mentioned"],
     "locations": [
         {{
@@ -61,7 +53,9 @@ Rules:
 - For locations, ALWAYS include the city and country even if not explicitly stated
 - If a business, neighborhood, mall, landmark, street market, gym, hotel, or venue is mentioned and it is likely to exist on Google Maps, include it.
 - Correct any obvious phonetic spelling mistakes in city or neighborhood names.
-- Provide EXACT matches for Category and Subcategory strings from the taxonomy list. Nothing else.
+- content_domain should be a clean user-facing label, not a sentence.
+- content_format should describe the kind of content, not the broad domain.
+- topical_tags should be short, concrete, and deduplicated.
 - Return ONLY the JSON object, no other text
 """
 
@@ -331,6 +325,9 @@ def extract_structured_data(
         extracted = ExtractedData(
             title=data.get("title", "Untitled Reel"),
             summary=data.get("summary", ""),
+            content_domain=data.get("content_domain", ""),
+            content_format=data.get("content_format", ""),
+            topical_tags=data.get("topical_tags", []),
             category=data.get("category", "Other"),
             subcategory=data.get("subcategory", "Other"),
             secondary_categories=data.get("secondary_categories", []),
@@ -342,7 +339,7 @@ def extract_structured_data(
 
         logger.info(
             f"Extracted: title='{extracted.title}', "
-            f"category={extracted.category}, "
+            f"content_domain={extracted.content_domain}, "
             f"{len(extracted.locations)} locations, "
             f"{len(extracted.key_facts)} facts"
         )
@@ -354,6 +351,9 @@ def extract_structured_data(
         return ExtractedData(
             title="Untitled Reel",
             summary=transcript[:200] if transcript else "",
+            content_domain="",
+            content_format="",
+            topical_tags=[],
             category="Other",
             subcategory="Other",
         )

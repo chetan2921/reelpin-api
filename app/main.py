@@ -22,7 +22,11 @@ from app.models import (
     ProcessingJobResponse,
     ProcessingJobStatus,
     ProactiveRecallPushRequest,
+    ReclassifyCategoriesInput,
+    ReclassifyCategoriesResponse,
     ReelInput,
+    ReelCategoryFiltersResponse,
+    ReelCategoryGroup,
     ReelResponse,
     SearchQuery,
     SearchResponse,
@@ -47,6 +51,7 @@ from app.services.database import (
     get_reel,
     get_reels,
     get_reels_by_ids,
+    list_user_category_pairs,
     list_processing_jobs_for_metrics,
     list_processing_jobs,
     upsert_device_push_token,
@@ -78,6 +83,10 @@ from app.services.security import (
     secret_configuration_warnings,
 )
 from app.services.processing_metadata import PROCESSING_VERSION
+from app.services.user_categories import (
+    build_user_category_filters,
+    recategorize_user_reels,
+)
 from app.config import get_settings
 from app.services.source_identity import resolve_source_identity
 
@@ -560,6 +569,60 @@ async def process_video(
             message=failure_user_message(failure.code, fallback="The uploaded video could not be processed."),
             detail=failure.message,
             retryable=is_retryable_failure_code(failure.code),
+        )
+
+
+@app.get("/api/v1/reels/category-filters", response_model=ReelCategoryFiltersResponse)
+async def get_reel_category_filters(
+    user_id: str = Query(..., description="Filter by user ID"),
+):
+    """List the user's dynamic category tree for reel filters."""
+    try:
+        categories = [
+            ReelCategoryGroup(**group)
+            for group in build_user_category_filters(
+                list_user_category_pairs(user_id=user_id)
+            )
+        ]
+        return ReelCategoryFiltersResponse(
+            user_id=user_id,
+            categories=categories,
+            total_categories=len(categories),
+        )
+    except Exception as e:
+        logger.error(f"List reel category filters failed: {e}")
+        raise ApiResponseError(
+            status_code=500,
+            error_code="reel_category_filters_failed",
+            message="Could not load category filters right now.",
+            detail=str(e),
+            retryable=True,
+        )
+
+
+@app.post("/api/v1/reels/reclassify-categories", response_model=ReclassifyCategoriesResponse)
+async def reclassify_saved_reel_categories(payload: ReclassifyCategoriesInput):
+    """Rebuild dynamic categories for a user's existing saved reels."""
+    try:
+        result = recategorize_user_reels(
+            user_id=payload.user_id,
+            limit=payload.limit,
+        )
+        categories = [ReelCategoryGroup(**group) for group in result["categories"]]
+        return ReclassifyCategoriesResponse(
+            user_id=payload.user_id,
+            reviewed=result["reviewed"],
+            updated=result["updated"],
+            categories=categories,
+        )
+    except Exception as e:
+        logger.error(f"Reclassify saved reel categories failed: {e}")
+        raise ApiResponseError(
+            status_code=500,
+            error_code="reel_recategorization_failed",
+            message="Could not rebuild reel categories right now.",
+            detail=str(e),
+            retryable=True,
         )
 
 
