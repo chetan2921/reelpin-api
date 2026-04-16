@@ -133,19 +133,6 @@ def download_media(url: str) -> DownloadedMedia:
             try:
                 slot_public_instagram_error = None
                 if _is_instagram_url(url):
-                    if (
-                        selected_cookie_slot is None
-                        and not use_browser_cookies
-                        and not apify_attempted
-                    ):
-                        apify_attempted = True
-                        apify_media = _try_instagram_apify_fallback(
-                            url,
-                            download_dir,
-                            settings=settings,
-                        )
-                        if apify_media is not None:
-                            return apify_media
                     if instagram_cookie_header:
                         try:
                             api_media = _download_authenticated_instagram_media(
@@ -177,6 +164,15 @@ def download_media(url: str) -> DownloadedMedia:
                     except Exception as e:
                         slot_public_instagram_error = str(e)
                         logger.warning("Public Instagram fetch failed: %s", e)
+                        if not apify_attempted:
+                            apify_attempted = True
+                            apify_media = _try_instagram_apify_fallback(
+                                url,
+                                download_dir,
+                                settings=settings,
+                            )
+                            if apify_media is not None:
+                                return apify_media
                         if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
                             last_error = Exception(slot_public_instagram_error)
                             continue

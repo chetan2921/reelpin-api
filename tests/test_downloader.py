@@ -60,7 +60,7 @@ class DownloaderTests(unittest.TestCase):
     @patch("app.services.downloader._build_cookie_slots_from_env")
     @patch("app.services.downloader.get_settings")
     @patch("app.services.downloader.logger.warning")
-    def test_download_media_tries_apify_before_public_and_cookie_slots(
+    def test_download_media_tries_apify_after_public_and_before_cookie_slots(
         self,
         mock_logger_warning,
         mock_get_settings,
@@ -98,7 +98,7 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(media.caption, "Apify caption")
         self.assertEqual(media.media_type, "video")
         mock_apify_fallback.assert_called_once()
-        mock_public_fetch.assert_not_called()
+        mock_public_fetch.assert_called_once()
         mock_authenticated_fetch.assert_not_called()
 
     @patch("app.services.downloader._download_remote_file")
