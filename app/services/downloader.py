@@ -42,6 +42,9 @@ _INSTAGRAM_API_HEADERS = {
     "User-Agent": _BROWSER_HEADERS["User-Agent"],
 }
 
+_APIFY_API_BASE_URL = "https://api.apify.com/v2"
+_APIFY_REQUEST_TIMEOUT_SECONDS = 120
+
 
 @dataclass
 class DownloadedMedia:
@@ -67,7 +70,6 @@ def download_media(url: str) -> DownloadedMedia:
     settings = get_settings()
     download_dir = settings.TEMP_DOWNLOAD_DIR
     os.makedirs(download_dir, exist_ok=True)
-    public_instagram_error = None
     cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
     cookie_slots = _ordered_cookie_slots(url, cookie_slots)
     candidate_slots: list[CookieSlot | None] = []
@@ -84,6 +86,7 @@ def download_media(url: str) -> DownloadedMedia:
         candidate_slots.append(None)
 
     last_error: Exception | None = None
+    apify_attempted = False
 
     try:
         for candidate_index, selected_cookie_slot in enumerate(candidate_slots):
@@ -130,6 +133,19 @@ def download_media(url: str) -> DownloadedMedia:
             try:
                 slot_public_instagram_error = None
                 if _is_instagram_url(url):
+                    if (
+                        selected_cookie_slot is None
+                        and not use_browser_cookies
+                        and not apify_attempted
+                    ):
+                        apify_attempted = True
+                        apify_media = _try_instagram_apify_fallback(
+                            url,
+                            download_dir,
+                            settings=settings,
+                        )
+                        if apify_media is not None:
+                            return apify_media
                     if instagram_cookie_header:
                         try:
                             api_media = _download_authenticated_instagram_media(
@@ -406,6 +422,245 @@ def _download_authenticated_instagram_media(
             )
 
     return None
+
+
+def _try_instagram_apify_fallback(
+    url: str,
+    download_dir: str,
+    *,
+    settings,
+) -> DownloadedMedia | None:
+    api_token = (getattr(settings, "APIFY_API_TOKEN", None) or "").strip()
+    actor_id = (getattr(settings, "APIFY_INSTAGRAM_ACTOR_ID", None) or "").strip()
+    if not api_token or not actor_id:
+        return None
+
+    logger.info("Trying Apify Instagram fallback for: %s", url)
+    try:
+        return _download_instagram_media_via_apify(
+            url,
+            download_dir,
+            api_token=api_token,
+            actor_id=actor_id,
+        )
+    except Exception as e:
+        logger.warning("Apify Instagram fallback failed: %s", e)
+        return None
+
+
+def _download_instagram_media_via_apify(
+    url: str,
+    download_dir: str,
+    *,
+    api_token: str,
+    actor_id: str,
+) -> DownloadedMedia:
+    payload = json.dumps(
+        {
+            "directUrls": [url],
+            "resultsLimit": 1,
+            "resultsType": _apify_instagram_results_type(url),
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"{_APIFY_API_BASE_URL}/acts/{_apify_actor_path(actor_id)}/run-sync-get-dataset-items",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=_APIFY_REQUEST_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        raise Exception(
+            f"Apify actor run returned HTTP {e.code}: {_read_apify_error_message(e)}"
+        ) from e
+    except urllib.error.URLError as e:
+        raise Exception("Apify request failed before Instagram media could be fetched.") from e
+
+    items = _apify_dataset_items(payload)
+    if not items:
+        raise Exception("Apify returned no Instagram items for this URL.")
+
+    media = _download_apify_instagram_item(items[0], url, download_dir)
+    if media is None:
+        raise Exception("Apify did not return a usable Instagram media URL.")
+
+    logger.info("Downloaded Instagram media via Apify actor %s", actor_id)
+    return media
+
+
+def _download_apify_instagram_item(
+    item: dict,
+    url: str,
+    download_dir: str,
+) -> DownloadedMedia | None:
+    if not isinstance(item, dict):
+        return None
+
+    caption = _apify_instagram_caption(item)
+    carousel_image_urls = _extract_apify_instagram_carousel_image_urls(item)
+    if carousel_image_urls:
+        return DownloadedMedia(
+            media_type="image",
+            media_paths=_download_instagram_image_urls(carousel_image_urls, download_dir),
+            caption=caption,
+            cookie_slot_index=None,
+        )
+
+    video_url = _extract_apify_instagram_video_url(item)
+    if video_url:
+        destination = os.path.join(download_dir, f"instagram-{uuid4().hex}.mp4")
+        _download_remote_file(video_url, destination)
+        return DownloadedMedia(
+            media_type="video",
+            media_paths=[destination],
+            caption=caption,
+            cookie_slot_index=None,
+        )
+
+    image_urls = _extract_apify_instagram_image_urls(item)
+    if image_urls and _instagram_path_kind(url) != "reel":
+        return DownloadedMedia(
+            media_type="image",
+            media_paths=_download_instagram_image_urls(image_urls, download_dir),
+            caption=caption,
+            cookie_slot_index=None,
+        )
+
+    return None
+
+
+def _download_instagram_image_urls(image_urls: list[str], download_dir: str) -> list[str]:
+    image_paths: list[str] = []
+    for index, image_url in enumerate(image_urls, start=1):
+        destination = os.path.join(
+            download_dir,
+            f"instagram-{uuid4().hex}-{index}.jpg",
+        )
+        _download_remote_file(image_url, destination)
+        image_paths.append(destination)
+    return image_paths
+
+
+def _apify_dataset_items(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ["items", "data"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _apify_instagram_results_type(url: str) -> str:
+    return "reels" if _instagram_path_kind(url) == "reel" else "posts"
+
+
+def _apify_actor_path(actor_id: str) -> str:
+    return urllib.parse.quote(actor_id.strip().replace("/", "~"), safe="~")
+
+
+def _read_apify_error_message(error: urllib.error.HTTPError) -> str:
+    try:
+        payload = json.loads(error.read().decode("utf-8"))
+    except Exception:
+        return "Apify did not return a detailed error message."
+
+    if isinstance(payload, dict):
+        nested_error = payload.get("error")
+        if isinstance(nested_error, dict) and nested_error.get("message"):
+            return str(nested_error["message"])
+        if payload.get("message"):
+            return str(payload["message"])
+    return "Apify did not return a detailed error message."
+
+
+def _apify_instagram_caption(item: dict) -> str:
+    caption = item.get("caption") or item.get("title") or item.get("text") or ""
+    if isinstance(caption, dict):
+        caption = caption.get("text") or ""
+    return str(caption)
+
+
+def _extract_apify_instagram_carousel_image_urls(item: dict) -> list[str]:
+    urls: list[str] = []
+    child_posts = item.get("childPosts") or item.get("child_posts") or []
+    if not isinstance(child_posts, list):
+        return urls
+
+    for child_post in child_posts:
+        if not isinstance(child_post, dict):
+            continue
+        if _extract_apify_instagram_video_url(child_post):
+            continue
+        for image_url in _extract_apify_instagram_image_urls(child_post):
+            if image_url not in urls:
+                urls.append(image_url)
+
+    return urls
+
+
+def _extract_apify_instagram_image_urls(item: dict) -> list[str]:
+    urls: list[str] = []
+    for key in [
+        "displayUrl",
+        "display_url",
+        "imageUrl",
+        "image_url",
+        "thumbnailUrl",
+        "thumbnail_url",
+    ]:
+        _append_apify_url(urls, item.get(key))
+
+    images = item.get("images") or []
+    if isinstance(images, list):
+        for image in images:
+            if isinstance(image, dict):
+                for key in ["url", "displayUrl", "display_url", "imageUrl", "image_url"]:
+                    _append_apify_url(urls, image.get(key))
+            else:
+                _append_apify_url(urls, image)
+
+    return urls
+
+
+def _extract_apify_instagram_video_url(item: dict) -> str | None:
+    for key in ["videoUrl", "video_url", "videoPlayUrl", "video_play_url"]:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    video_versions = item.get("videoVersions") or item.get("video_versions") or []
+    if isinstance(video_versions, list):
+        best_video = max(
+            [
+                entry
+                for entry in video_versions
+                if isinstance(entry, dict) and entry.get("url")
+            ],
+            key=lambda entry: int(entry.get("height") or 0) * int(entry.get("width") or 0),
+            default=None,
+        )
+        if best_video:
+            return str(best_video["url"])
+
+    return None
+
+
+def _append_apify_url(urls: list[str], value) -> None:
+    if not isinstance(value, str):
+        return
+    normalized = value.strip()
+    if not normalized or normalized in urls:
+        return
+    urls.append(normalized)
 
 
 def _download_instagram_image_entries(

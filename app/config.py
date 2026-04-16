@@ -81,6 +81,8 @@ class Settings(BaseSettings):
     YOUTUBE_COOKIE_DATA_BASE64: str | None = None
     TIKTOK_COOKIE_DATA: str | None = None
     TIKTOK_COOKIE_DATA_BASE64: str | None = None
+    APIFY_API_TOKEN: str | None = None
+    APIFY_INSTAGRAM_ACTOR_ID: str | None = "apify/instagram-scraper"
 
     # App settings
     TEMP_DOWNLOAD_DIR: str = "/tmp/reelmind_downloads"
