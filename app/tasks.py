@@ -134,6 +134,12 @@ def process_reel_job(job: dict, *, worker_id: str) -> None:
                 duration_seconds=total_duration,
                 extra={"result_reel_id": existing_reel["id"]},
             )
+            _notify_reel_ready(
+                user_id=job["user_id"],
+                reel_id=existing_reel["id"],
+                job_id=job_id,
+                reel_title=existing_reel.get("title"),
+            )
             return
 
         reel, step_durations = asyncio.run(

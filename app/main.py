@@ -57,6 +57,7 @@ from app.services.database import (
     upsert_device_push_token,
 )
 from app.services.notifications import send_push_notification
+from app.services.completion_notifications import send_reel_ready_notification
 from app.services.observability import build_processing_metrics, log_processing_event
 from app.services.health_checks import (
     build_live_health_response,
@@ -357,7 +358,18 @@ async def enqueue_reel_processing(payload: EnqueueReelJobInput):
                 attempt_count=int(existing_job.get("attempt_count", 0) or 0),
                 max_attempts=int(existing_job.get("max_attempts", 0) or 0),
             )
-            return _db_job_to_response(existing_job)
+            response = _db_job_to_response(existing_job)
+            if (
+                response.status == ProcessingJobStatus.completed
+                and response.result_reel_id
+            ):
+                _notify_reel_ready(
+                    user_id=payload.user_id,
+                    reel_id=response.result_reel_id,
+                    job_id=response.id,
+                    reel_title=response.reel.title if response.reel else None,
+                )
+            return response
 
         existing_reel = find_reel_by_user_and_url(
             user_id=payload.user_id,
@@ -393,6 +405,12 @@ async def enqueue_reel_processing(payload: EnqueueReelJobInput):
                 processing_step="completed",
                 status="completed",
                 extra={"result_reel_id": existing_reel["id"]},
+            )
+            _notify_reel_ready(
+                user_id=payload.user_id,
+                reel_id=existing_reel["id"],
+                job_id=job["id"],
+                reel_title=existing_reel.get("title"),
             )
             return _db_job_to_response(job)
 
@@ -858,6 +876,33 @@ def _db_record_to_response(record: dict) -> ReelResponse:
         actionable_items=record.get("actionable_items", []),
         created_at=record.get("created_at"),
     )
+
+
+def _notify_reel_ready(
+    *,
+    user_id: str,
+    reel_id: str,
+    job_id: str,
+    reel_title: str | None,
+) -> None:
+    try:
+        delivered = send_reel_ready_notification(
+            user_id=user_id,
+            reel_id=reel_id,
+            job_id=job_id,
+            reel_title=reel_title,
+        )
+        log_processing_event(
+            logger,
+            "api.processing_job.notification_sent",
+            job_id=job_id,
+            user_id=user_id,
+            processing_step="completed",
+            status="notification_sent",
+            extra={"delivered_device_count": delivered, "result_reel_id": reel_id},
+        )
+    except Exception as e:
+        logger.warning("Completion push skipped for job %s: %s", job_id, e)
 
 
 def _db_job_to_response(record: dict) -> ProcessingJobResponse:
