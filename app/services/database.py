@@ -1087,6 +1087,24 @@ def get_device_push_tokens(user_id: str) -> list[str]:
         raise
 
 
+def delete_device_push_tokens(tokens: list[str]) -> int:
+    if not tokens:
+        return 0
+
+    client = _get_client()
+    try:
+        result = (
+            client.table("device_push_tokens")
+            .delete()
+            .in_("fcm_token", tokens)
+            .execute()
+        )
+        return len(result.data or [])
+    except Exception as e:
+        logger.error("Failed to delete device push tokens: %s", e)
+        raise
+
+
 def _find_normalized_url_match(records: list[dict], url: str) -> dict | None:
     for record in records:
         try:

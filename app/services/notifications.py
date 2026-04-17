@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import firebase_admin
+from firebase_admin import exceptions as firebase_exceptions
 from firebase_admin import credentials, messaging
 
 from app.config import get_settings
@@ -10,6 +11,7 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 _firebase_app: firebase_admin.App | None = None
+_ANDROID_NOTIFICATION_CHANNEL_ID = "reelpin_updates"
 
 
 def _get_firebase_app() -> firebase_admin.App:
@@ -57,6 +59,20 @@ def send_push_notification(
         notification=messaging.Notification(title=title, body=body),
         data=data or {},
         tokens=tokens,
+        android=messaging.AndroidConfig(
+            priority="high",
+            notification=messaging.AndroidNotification(
+                channel_id=_ANDROID_NOTIFICATION_CHANNEL_ID,
+                priority="high",
+                default_sound=True,
+            ),
+        ),
+        apns=messaging.APNSConfig(
+            headers={"apns-priority": "10"},
+            payload=messaging.APNSPayload(
+                aps=messaging.Aps(sound="default"),
+            ),
+        ),
     )
     response = messaging.send_each_for_multicast(message)
     logger.info(
@@ -64,4 +80,56 @@ def send_push_notification(
         response.success_count,
         response.failure_count,
     )
+    _handle_send_failures(tokens=tokens, response=response)
     return response.success_count
+
+
+def _handle_send_failures(
+    *,
+    tokens: list[str],
+    response,
+) -> None:
+    invalid_tokens: list[str] = []
+
+    for token, send_response in zip(tokens, response.responses):
+        if send_response.success:
+            continue
+
+        error = send_response.exception
+        error_code = _error_code(error)
+        logger.warning(
+            "FCM send failed for token %s: %s (%s)",
+            _mask_token(token),
+            error_code,
+            error,
+        )
+        if isinstance(error, (messaging.UnregisteredError, messaging.SenderIdMismatchError)):
+            invalid_tokens.append(token)
+
+    if invalid_tokens:
+        deleted = _delete_invalid_tokens(invalid_tokens)
+        logger.info(
+            "Removed %s invalid device push token(s) after FCM rejection.",
+            deleted,
+        )
+
+
+def _delete_invalid_tokens(tokens: list[str]) -> int:
+    from app.services.database import delete_device_push_tokens
+
+    return delete_device_push_tokens(tokens)
+
+
+def _error_code(error: Exception | None) -> str:
+    if error is None:
+        return "unknown"
+    if isinstance(error, firebase_exceptions.FirebaseError):
+        return error.code
+    return error.__class__.__name__
+
+
+def _mask_token(token: str) -> str:
+    cleaned = token.strip()
+    if len(cleaned) <= 8:
+        return cleaned
+    return f"...{cleaned[-8:]}"
