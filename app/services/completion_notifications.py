@@ -8,7 +8,7 @@ def build_reel_ready_notification_payload(
     if normalized_title:
         body = f"{normalized_title} is ready in ReelPin."
     else:
-        body = "Your saved reel is ready in ReelPin."
+        body = "Reel saved and is ready in ReelPin."
 
     return {
         "title": "Reel pinned in ReelPin",

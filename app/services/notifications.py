@@ -54,6 +54,11 @@ def send_push_notification(
         return 0
 
     _get_firebase_app()
+    reel_id = (data or {}).get("reel_id")
+    collapse_key = f"reel_ready_{reel_id}" if reel_id else None
+    apns_headers = {"apns-priority": "10"}
+    if collapse_key:
+        apns_headers["apns-collapse-id"] = collapse_key
 
     message = messaging.MulticastMessage(
         notification=messaging.Notification(title=title, body=body),
@@ -61,14 +66,16 @@ def send_push_notification(
         tokens=tokens,
         android=messaging.AndroidConfig(
             priority="high",
+            collapse_key=collapse_key,
             notification=messaging.AndroidNotification(
                 channel_id=_ANDROID_NOTIFICATION_CHANNEL_ID,
                 priority="high",
                 default_sound=True,
+                tag=collapse_key,
             ),
         ),
         apns=messaging.APNSConfig(
-            headers={"apns-priority": "10"},
+            headers=apns_headers,
             payload=messaging.APNSPayload(
                 aps=messaging.Aps(sound="default"),
             ),
