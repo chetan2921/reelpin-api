@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from typing import Any, Optional
 from datetime import datetime
 from enum import Enum
@@ -62,9 +62,23 @@ class EnqueueReelJobInput(BaseModel):
 
 
 class DevicePushTokenInput(BaseModel):
-    user_id: str = Field(..., description="Authenticated user identifier")
-    token: str = Field(..., description="Firebase Cloud Messaging token")
-    platform: str = Field(..., description="ios, android, or web")
+    model_config = ConfigDict(populate_by_name=True)
+
+    user_id: str = Field(
+        ...,
+        description="Authenticated user identifier",
+        validation_alias=AliasChoices("user_id", "userId"),
+    )
+    token: str = Field(
+        ...,
+        description="Firebase Cloud Messaging token",
+        validation_alias=AliasChoices("token", "fcm_token", "fcmToken"),
+    )
+    platform: str = Field(
+        ...,
+        description="ios, android, or web",
+        validation_alias=AliasChoices("platform", "device_platform", "devicePlatform"),
+    )
 
 
 class ProactiveRecallPushRequest(BaseModel):

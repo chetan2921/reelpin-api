@@ -1,3 +1,9 @@
+import logging
+
+
+logger = logging.getLogger(__name__)
+
+
 def build_reel_ready_notification_payload(
     *,
     reel_id: str,
@@ -35,14 +41,26 @@ def send_reel_ready_notification(
     )
     tokens = _get_device_tokens(user_id)
     if not tokens:
+        logger.warning(
+            "No device push tokens registered for user %s; completion push skipped for job %s.",
+            user_id,
+            job_id,
+        )
         return 0
 
-    return _send_push(
+    delivered = _send_push(
         tokens=tokens,
         title=payload["title"],
         body=payload["body"],
         data=payload["data"],
     )
+    if delivered == 0:
+        logger.warning(
+            "Completion push accepted zero deliveries for user %s on job %s.",
+            user_id,
+            job_id,
+        )
+    return delivered
 
 
 def _get_device_tokens(user_id: str) -> list[str]:

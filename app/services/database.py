@@ -1084,11 +1084,14 @@ def get_reels_by_ids(reel_ids: list[str]) -> list[dict]:
 def upsert_device_push_token(user_id: str, token: str, platform: str) -> dict:
     client = _get_client()
     try:
+        cleaned_user_id = str(user_id).strip()
+        cleaned_token = str(token).strip()
+        cleaned_platform = str(platform).strip().lower()
         result = client.table("device_push_tokens").upsert(
             {
-                "user_id": user_id,
-                "fcm_token": token,
-                "platform": platform,
+                "user_id": cleaned_user_id,
+                "fcm_token": cleaned_token,
+                "platform": cleaned_platform,
                 "last_seen_at": datetime.now(timezone.utc).isoformat(),
             },
             on_conflict="fcm_token",
@@ -1108,7 +1111,15 @@ def get_device_push_tokens(user_id: str) -> list[str]:
             .eq("user_id", user_id)
             .execute()
         )
-        return [row["fcm_token"] for row in result.data]
+        tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for row in result.data:
+            token = str(row.get("fcm_token") or "").strip()
+            if not token or token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            tokens.append(token)
+        return tokens
     except Exception as e:
         logger.error(f"Failed to fetch device push tokens for {user_id}: {e}")
         raise

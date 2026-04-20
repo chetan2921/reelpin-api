@@ -1,6 +1,7 @@
 import logging
 import json
 from pathlib import Path
+import time
 
 import firebase_admin
 from firebase_admin import exceptions as firebase_exceptions
@@ -12,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 _firebase_app: firebase_admin.App | None = None
 _ANDROID_NOTIFICATION_CHANNEL_ID = "reelpin_updates"
+_ANDROID_CLICK_ACTION = "FLUTTER_NOTIFICATION_CLICK"
+_FCM_RETRYABLE_ERROR_CODES = {"internal", "unavailable", "deadline-exceeded", "unknown"}
+_FCM_MAX_SEND_ATTEMPTS = 3
 
 
 def _get_firebase_app() -> firebase_admin.App:
@@ -50,19 +54,46 @@ def send_push_notification(
     body: str,
     data: dict[str, str] | None = None,
 ) -> int:
-    if not tokens:
+    normalized_tokens = _normalize_tokens(tokens)
+    if not normalized_tokens:
         return 0
 
     _get_firebase_app()
-    reel_id = (data or {}).get("reel_id")
+    message = _build_multicast_message(
+        tokens=normalized_tokens,
+        title=title,
+        body=body,
+        data=data or {},
+    )
+    response = _send_multicast_with_retry(message)
+    logger.info(
+        "FCM multicast complete: %s success / %s failure",
+        response.success_count,
+        response.failure_count,
+    )
+    _handle_send_failures(tokens=normalized_tokens, response=response)
+    return response.success_count
+
+
+def _build_multicast_message(
+    *,
+    tokens: list[str],
+    title: str,
+    body: str,
+    data: dict[str, str],
+) -> messaging.MulticastMessage:
+    reel_id = data.get("reel_id")
     collapse_key = f"reel_ready_{reel_id}" if reel_id else None
-    apns_headers = {"apns-priority": "10"}
+    apns_headers = {
+        "apns-priority": "10",
+        "apns-push-type": "alert",
+    }
     if collapse_key:
         apns_headers["apns-collapse-id"] = collapse_key
 
-    message = messaging.MulticastMessage(
+    return messaging.MulticastMessage(
         notification=messaging.Notification(title=title, body=body),
-        data=data or {},
+        data=data,
         tokens=tokens,
         android=messaging.AndroidConfig(
             priority="high",
@@ -71,24 +102,43 @@ def send_push_notification(
                 channel_id=_ANDROID_NOTIFICATION_CHANNEL_ID,
                 priority="high",
                 default_sound=True,
+                sound="default",
                 tag=collapse_key,
+                click_action=_ANDROID_CLICK_ACTION,
             ),
         ),
         apns=messaging.APNSConfig(
             headers=apns_headers,
             payload=messaging.APNSPayload(
-                aps=messaging.Aps(sound="default"),
+                aps=messaging.Aps(
+                    sound="default",
+                    content_available=True,
+                    mutable_content=True,
+                    category="REEL_READY",
+                ),
             ),
         ),
     )
-    response = messaging.send_each_for_multicast(message)
-    logger.info(
-        "FCM multicast complete: %s success / %s failure",
-        response.success_count,
-        response.failure_count,
-    )
-    _handle_send_failures(tokens=tokens, response=response)
-    return response.success_count
+
+
+def _send_multicast_with_retry(message: messaging.MulticastMessage):
+    for attempt in range(1, _FCM_MAX_SEND_ATTEMPTS + 1):
+        try:
+            return messaging.send_each_for_multicast(message)
+        except Exception as e:
+            if attempt >= _FCM_MAX_SEND_ATTEMPTS or not _is_retryable_send_error(e):
+                raise
+
+            delay_seconds = float(attempt)
+            logger.warning(
+                "FCM multicast attempt %s failed with %s; retrying in %.1fs",
+                attempt,
+                _error_code(e),
+                delay_seconds,
+            )
+            time.sleep(delay_seconds)
+
+    raise RuntimeError("FCM multicast exhausted all retry attempts.")
 
 
 def _handle_send_failures(
@@ -133,6 +183,26 @@ def _error_code(error: Exception | None) -> str:
     if isinstance(error, firebase_exceptions.FirebaseError):
         return error.code
     return error.__class__.__name__
+
+
+def _normalize_tokens(tokens: list[str]) -> list[str]:
+    normalized_tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    for token in tokens:
+        cleaned = str(token or "").strip()
+        if not cleaned or cleaned in seen_tokens:
+            continue
+        seen_tokens.add(cleaned)
+        normalized_tokens.append(cleaned)
+    return normalized_tokens
+
+
+def _is_retryable_send_error(error: Exception) -> bool:
+    if isinstance(error, (ConnectionError, OSError, TimeoutError)):
+        return True
+
+    code = _error_code(error)
+    return code in _FCM_RETRYABLE_ERROR_CODES
 
 
 def _mask_token(token: str) -> str:
