@@ -35,7 +35,15 @@ from app.services.source_identity import resolve_source_identity
 configure_secure_logging()
 logger = logging.getLogger(__name__)
 settings = get_settings()
-WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
+WORKER_INSTANCE_ID = (
+    os.getenv("WORKER_INSTANCE_ID")
+    or os.getenv("RAILWAY_REPLICA_ID")
+    or os.getenv("HOSTNAME")
+    or socket.gethostname()
+    or str(os.getpid())
+)
+WORKER_ID = f"{WORKER_INSTANCE_ID}:{os.getpid()}"
+WORKER_SERVICE_NAME = f"worker:{WORKER_INSTANCE_ID}"
 
 
 class JobClaimLostError(RuntimeError):
@@ -402,15 +410,20 @@ def _active_source_keys(active_futures: dict[Future, dict]) -> list[str]:
 def _worker_heartbeat_details(active_futures: dict[Future, dict]) -> dict:
     return {
         "worker_id": WORKER_ID,
+        "worker_instance_id": WORKER_INSTANCE_ID,
+        "service_name": WORKER_SERVICE_NAME,
+        "service_mode": settings.SERVICE_MODE,
         "active_job_count": len(active_futures),
         "active_platform_counts": _active_platform_counts(active_futures),
         "active_source_keys": _active_source_keys(active_futures),
         "max_concurrency": max(1, settings.WORKER_CONCURRENCY),
+        "platform_limits": _platform_limits(),
     }
 
 
 def run_worker() -> None:
     worker_concurrency = max(1, settings.WORKER_CONCURRENCY)
+    platform_limits = _platform_limits()
     logger.info(
         "Runtime secret configuration: %s",
         build_secret_configuration_summary(settings),
@@ -418,14 +431,15 @@ def run_worker() -> None:
     for warning in secret_configuration_warnings(settings):
         logger.warning(warning)
     logger.info(
-        "Background worker started with %.1fs polling interval and concurrency %s",
+        "Background worker %s started with %.1fs polling interval, concurrency %s, and platform limits %s",
+        WORKER_SERVICE_NAME,
         settings.WORKER_POLL_INTERVAL_SECONDS,
         worker_concurrency,
+        platform_limits,
     )
     last_recovery_at = 0.0
     last_heartbeat_at = 0.0
     active_futures: dict[Future, dict] = {}
-    platform_limits = _platform_limits()
 
     _heartbeat_worker(
         status="ok",
@@ -463,6 +477,8 @@ def run_worker() -> None:
                         worker_id=WORKER_ID,
                         max_jobs=available_slots,
                         platform_limits=platform_limits,
+                        current_platform_counts=_active_platform_counts(active_futures),
+                        current_source_keys=set(_active_source_keys(active_futures)),
                     )
                     for job in claimed_jobs:
                         future = executor.submit(process_reel_job, job, worker_id=WORKER_ID)
@@ -494,12 +510,26 @@ def run_worker() -> None:
 
 def _heartbeat_worker(*, status: str, details: dict) -> None:
     try:
+        per_worker_details = {
+            "poll_interval_seconds": settings.WORKER_POLL_INTERVAL_SECONDS,
+            **details,
+        }
+        upsert_service_health(
+            service_name=WORKER_SERVICE_NAME,
+            status=status,
+            details=per_worker_details,
+        )
         upsert_service_health(
             service_name="worker",
             status=status,
             details={
                 "poll_interval_seconds": settings.WORKER_POLL_INTERVAL_SECONDS,
-                **details,
+                "service_mode": settings.SERVICE_MODE,
+                "last_reporting_worker": WORKER_SERVICE_NAME,
+                "worker_id": WORKER_ID,
+                "worker_instance_id": WORKER_INSTANCE_ID,
+                "state": details.get("state"),
+                "last_error": details.get("last_error"),
             },
         )
     except Exception as e:

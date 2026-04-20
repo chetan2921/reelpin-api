@@ -121,6 +121,7 @@ SEARCH_STOP_WORDS = {
     "top",
     "with",
 }
+SEARCH_FALLBACK_SCAN_LIMIT = 500
 
 
 @asynccontextmanager
@@ -728,59 +729,79 @@ async def search_reels(query: SearchQuery):
     Uses Pinecone vector similarity to find relevant reels.
     """
     try:
-        # Search Pinecone for similar vectors
-        matches = search_similar(
-            query=query.query,
-            user_id=query.user_id,
-            category=query.category,
-            top_k=max(query.limit * 4, 12),
-            subcategory=query.subcategory
-        )
-
-        if not matches:
-            return SearchResponse(query=query.query, results=[], total=0)
-
-        # Fetch full reel data from Supabase
-        reel_ids = [m["reel_id"] for m in matches]
-        reels = get_reels_by_ids(reel_ids)
-
-        # Map reels by ID for easy lookup
-        reel_map = {r["id"]: r for r in reels}
-
-        # Build results in relevance order with a stricter hybrid relevance filter.
         query_tokens = _search_tokens(query.query)
-        ranked_results = []
-        for match in matches:
-            reel_record = reel_map.get(match["reel_id"])
-            if reel_record:
-                semantic_score = float(match["score"])
-                lexical_score = _lexical_score(
-                    reel_record,
-                    query.query,
-                    query_tokens,
-                )
-                combined_score = round(
-                    (semantic_score * 0.72) + (lexical_score * 0.28),
-                    4,
-                )
+        normalized_query = query.query.strip().lower()
+        ranked_results: list[tuple[float, SearchResult]] = []
+        seen_reel_ids: set[str] = set()
 
-                if not _is_relevant_match(
-                    semantic_score=semantic_score,
-                    lexical_score=lexical_score,
-                    normalized_query=query.query.strip().lower(),
-                    query_tokens=query_tokens,
-                ):
-                    continue
+        try:
+            matches = search_similar(
+                query=query.query,
+                user_id=query.user_id,
+                category=query.category,
+                top_k=max(query.limit * 4, 12),
+                subcategory=query.subcategory,
+            )
 
-                ranked_results.append(
-                    (
-                        combined_score,
-                        SearchResult(
-                            reel=_db_record_to_response(reel_record),
-                            relevance_score=combined_score,
-                        ),
+            if matches:
+                reel_ids = [m["reel_id"] for m in matches]
+                reels = get_reels_by_ids(reel_ids)
+                reel_map = {r["id"]: r for r in reels}
+
+                for match in matches:
+                    reel_record = reel_map.get(match["reel_id"])
+                    if not reel_record:
+                        continue
+
+                    semantic_score = float(match["score"])
+                    lexical_score = _lexical_score(
+                        reel_record,
+                        query.query,
+                        query_tokens,
                     )
+                    if not _is_relevant_match(
+                        semantic_score=semantic_score,
+                        lexical_score=lexical_score,
+                        normalized_query=normalized_query,
+                        query_tokens=query_tokens,
+                    ):
+                        continue
+
+                    combined_score = round(
+                        (semantic_score * 0.72) + (lexical_score * 0.28),
+                        4,
+                    )
+                    reel_id = str(reel_record.get("id", ""))
+                    if reel_id in seen_reel_ids:
+                        continue
+
+                    ranked_results.append(
+                        (
+                            combined_score,
+                            SearchResult(
+                                reel=_db_record_to_response(reel_record),
+                                relevance_score=combined_score,
+                            ),
+                        )
+                    )
+                    seen_reel_ids.add(reel_id)
+        except Exception as semantic_error:
+            logger.warning(
+                "Semantic search unavailable for query '%s': %s",
+                query.query[:80],
+                semantic_error,
+            )
+
+        if len(ranked_results) < query.limit:
+            ranked_results.extend(
+                _build_backend_fallback_results(
+                    query=query,
+                    query_tokens=query_tokens,
+                    normalized_query=normalized_query,
+                    excluded_reel_ids=seen_reel_ids,
+                    limit=query.limit - len(ranked_results),
                 )
+            )
 
         ranked_results.sort(key=lambda item: item[0], reverse=True)
         results = [item[1] for item in ranked_results[: query.limit]]
@@ -1018,6 +1039,68 @@ def _search_tokens(query: str) -> list[str]:
         token for token in tokens
         if len(token) > 1 and token not in SEARCH_STOP_WORDS
     ]
+
+
+def _build_backend_fallback_results(
+    *,
+    query: SearchQuery,
+    query_tokens: list[str],
+    normalized_query: str,
+    excluded_reel_ids: set[str],
+    limit: int,
+) -> list[tuple[float, SearchResult]]:
+    if limit <= 0 or len(normalized_query) < 2:
+        return []
+
+    candidate_limit = min(
+        max(query.limit * 40, 200),
+        SEARCH_FALLBACK_SCAN_LIMIT,
+    )
+    candidate_reels = get_reels(
+        user_id=query.user_id,
+        category=query.category,
+        subcategory=query.subcategory,
+        limit=candidate_limit,
+    )
+
+    ranked_results: list[tuple[float, SearchResult]] = []
+    for reel_record in candidate_reels:
+        reel_id = str(reel_record.get("id", ""))
+        if not reel_id or reel_id in excluded_reel_ids:
+            continue
+
+        lexical_score = _lexical_score(
+            reel_record,
+            query.query,
+            query_tokens,
+        )
+        if not _is_relevant_match(
+            semantic_score=0.0,
+            lexical_score=lexical_score,
+            normalized_query=normalized_query,
+            query_tokens=query_tokens,
+        ):
+            continue
+
+        ranked_results.append(
+            (
+                round(lexical_score, 4),
+                SearchResult(
+                    reel=_db_record_to_response(reel_record),
+                    relevance_score=round(lexical_score, 4),
+                ),
+            )
+        )
+
+    ranked_results.sort(key=lambda item: item[0], reverse=True)
+    trimmed = ranked_results[:limit]
+    if trimmed:
+        logger.info(
+            "Backend lexical fallback supplied %s result(s) for query '%s'",
+            len(trimmed),
+            query.query[:80],
+        )
+    return trimmed
 
 
 def _lexical_score(record: dict, query: str, query_tokens: list[str]) -> float:

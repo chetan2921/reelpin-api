@@ -208,7 +208,12 @@ class ObservabilityMetricsResponse(BaseModel):
     total_retries: int = 0
     success_rate_by_platform: dict[str, float] = Field(default_factory=dict)
     failure_rate_by_platform: dict[str, float] = Field(default_factory=dict)
+    retry_rate_by_platform: dict[str, float] = Field(default_factory=dict)
+    average_enqueue_to_start_seconds: float = 0.0
+    average_enqueue_to_start_seconds_by_platform: dict[str, float] = Field(default_factory=dict)
     average_processing_seconds: float = 0.0
+    average_total_job_seconds: float = 0.0
+    average_total_job_seconds_by_platform: dict[str, float] = Field(default_factory=dict)
     average_processing_seconds_by_platform: dict[str, float] = Field(default_factory=dict)
     average_step_seconds: dict[str, float] = Field(default_factory=dict)
     retry_count_by_platform: dict[str, int] = Field(default_factory=dict)

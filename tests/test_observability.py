@@ -11,6 +11,9 @@ class ObservabilityMetricsTests(unittest.TestCase):
                     "status": "completed",
                     "source_platform": "instagram",
                     "attempt_count": 1,
+                    "created_at": "2026-04-17T10:00:00+00:00",
+                    "started_at": "2026-04-17T10:00:05+00:00",
+                    "completed_at": "2026-04-17T10:00:20+00:00",
                     "step_durations": {
                         "download_seconds": 2.0,
                         "transcribe_seconds": 4.0,
@@ -21,12 +24,18 @@ class ObservabilityMetricsTests(unittest.TestCase):
                     "status": "dead_lettered",
                     "source_platform": "instagram",
                     "attempt_count": 2,
+                    "created_at": "2026-04-17T10:01:00+00:00",
+                    "started_at": "2026-04-17T10:01:20+00:00",
+                    "completed_at": "2026-04-17T10:02:00+00:00",
                     "step_durations": {},
                 },
                 {
                     "status": "completed",
                     "source_platform": "youtube",
                     "attempt_count": 3,
+                    "created_at": "2026-04-17T10:03:00+00:00",
+                    "started_at": "2026-04-17T10:03:10+00:00",
+                    "completed_at": "2026-04-17T10:03:18+00:00",
                     "step_durations": {
                         "download_seconds": 0.0,
                         "transcribe_seconds": 0.0,
@@ -53,8 +62,20 @@ class ObservabilityMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["success_rate_by_platform"]["instagram"], 0.5)
         self.assertEqual(metrics["failure_rate_by_platform"]["instagram"], 0.5)
         self.assertEqual(metrics["success_rate_by_platform"]["youtube"], 1.0)
+        self.assertEqual(metrics["retry_rate_by_platform"]["instagram"], 0.5)
+        self.assertEqual(metrics["retry_rate_by_platform"]["youtube"], 1.0)
         self.assertEqual(metrics["retry_count_by_platform"]["youtube"], 2)
+        self.assertEqual(metrics["average_enqueue_to_start_seconds"], 11.667)
+        self.assertEqual(
+            metrics["average_enqueue_to_start_seconds_by_platform"]["instagram"],
+            12.5,
+        )
         self.assertEqual(metrics["average_processing_seconds"], 6.5)
+        self.assertEqual(metrics["average_total_job_seconds"], 32.667)
+        self.assertEqual(
+            metrics["average_total_job_seconds_by_platform"]["instagram"],
+            40.0,
+        )
         self.assertEqual(metrics["average_processing_seconds_by_platform"]["instagram"], 10.0)
         self.assertEqual(metrics["average_step_seconds"]["download_seconds"], 1.0)
         self.assertEqual(metrics["average_step_seconds"]["transcribe_seconds"], 2.0)

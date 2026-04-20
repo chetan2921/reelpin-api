@@ -1,9 +1,16 @@
 import os
 import sys
 
+VALID_SERVICE_MODES = {"api", "worker"}
+
 
 def main() -> None:
     service_mode = os.getenv("SERVICE_MODE", "api").strip().lower()
+    if service_mode not in VALID_SERVICE_MODES:
+        allowed = ", ".join(sorted(VALID_SERVICE_MODES))
+        raise RuntimeError(
+            f"Unsupported SERVICE_MODE '{service_mode}'. Expected one of: {allowed}."
+        )
 
     if service_mode == "worker":
         from app.tasks import run_worker

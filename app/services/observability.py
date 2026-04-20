@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from app.models import ProcessingJobStatus
 from app.services.source_identity import SourceIdentity, resolve_source_identity
@@ -70,14 +71,24 @@ def build_processing_metrics(
         lambda: {
             "success": 0,
             "failure": 0,
+            "terminal": 0,
             "retry_count": 0,
+            "retry_job_count": 0,
             "processing_seconds_total": 0.0,
             "processing_seconds_count": 0,
+            "enqueue_to_start_total": 0.0,
+            "enqueue_to_start_count": 0,
+            "total_job_seconds_total": 0.0,
+            "total_job_seconds_count": 0,
         }
     )
     step_totals: dict[str, dict[str, float]] = defaultdict(
         lambda: {"total": 0.0, "count": 0}
     )
+    total_enqueue_to_start_seconds = 0.0
+    total_enqueue_to_start_count = 0
+    total_job_seconds = 0.0
+    total_job_count = 0
     total_processing_seconds = 0.0
     total_processing_count = 0
     total_retries = 0
@@ -94,6 +105,16 @@ def build_processing_metrics(
             platform_totals[platform]["retry_count"] += retries
             total_retries += retries
 
+        enqueue_to_start_seconds = _elapsed_seconds(
+            job.get("created_at"),
+            job.get("started_at"),
+        )
+        if enqueue_to_start_seconds is not None:
+            platform_totals[platform]["enqueue_to_start_total"] += enqueue_to_start_seconds
+            platform_totals[platform]["enqueue_to_start_count"] += 1
+            total_enqueue_to_start_seconds += enqueue_to_start_seconds
+            total_enqueue_to_start_count += 1
+
         if status not in {
             ProcessingJobStatus.completed.value,
             ProcessingJobStatus.failed.value,
@@ -102,6 +123,20 @@ def build_processing_metrics(
             continue
 
         terminal_jobs += 1
+        platform_totals[platform]["terminal"] += 1
+        if retries:
+            platform_totals[platform]["retry_job_count"] += 1
+
+        total_job_duration = _elapsed_seconds(
+            job.get("created_at"),
+            job.get("completed_at") or job.get("updated_at"),
+        )
+        if total_job_duration is not None:
+            platform_totals[platform]["total_job_seconds_total"] += total_job_duration
+            platform_totals[platform]["total_job_seconds_count"] += 1
+            total_job_seconds += total_job_duration
+            total_job_count += 1
+
         if status == ProcessingJobStatus.completed.value:
             platform_totals[platform]["success"] += 1
             total_seconds = _parse_duration(step_durations.get("total_seconds"))
@@ -124,7 +159,10 @@ def build_processing_metrics(
 
     success_rate_by_platform = {}
     failure_rate_by_platform = {}
+    retry_rate_by_platform = {}
     average_processing_seconds_by_platform = {}
+    average_enqueue_to_start_seconds_by_platform = {}
+    average_total_job_seconds_by_platform = {}
     retry_count_by_platform = {}
 
     for platform, totals in sorted(platform_totals.items()):
@@ -137,11 +175,31 @@ def build_processing_metrics(
             (totals["failure"] / terminal_total) if terminal_total else 0.0,
             4,
         )
+        retry_rate_by_platform[platform] = round(
+            (totals["retry_job_count"] / totals["terminal"]) if totals["terminal"] else 0.0,
+            4,
+        )
         average_processing_seconds_by_platform[platform] = round(
             (
                 totals["processing_seconds_total"] / totals["processing_seconds_count"]
             )
             if totals["processing_seconds_count"]
+            else 0.0,
+            3,
+        )
+        average_enqueue_to_start_seconds_by_platform[platform] = round(
+            (
+                totals["enqueue_to_start_total"] / totals["enqueue_to_start_count"]
+            )
+            if totals["enqueue_to_start_count"]
+            else 0.0,
+            3,
+        )
+        average_total_job_seconds_by_platform[platform] = round(
+            (
+                totals["total_job_seconds_total"] / totals["total_job_seconds_count"]
+            )
+            if totals["total_job_seconds_count"]
             else 0.0,
             3,
         )
@@ -159,12 +217,27 @@ def build_processing_metrics(
         "total_retries": total_retries,
         "success_rate_by_platform": success_rate_by_platform,
         "failure_rate_by_platform": failure_rate_by_platform,
+        "retry_rate_by_platform": retry_rate_by_platform,
+        "average_enqueue_to_start_seconds": round(
+            (total_enqueue_to_start_seconds / total_enqueue_to_start_count)
+            if total_enqueue_to_start_count
+            else 0.0,
+            3,
+        ),
+        "average_enqueue_to_start_seconds_by_platform": average_enqueue_to_start_seconds_by_platform,
         "average_processing_seconds": round(
             (total_processing_seconds / total_processing_count)
             if total_processing_count
             else 0.0,
             3,
         ),
+        "average_total_job_seconds": round(
+            (total_job_seconds / total_job_count)
+            if total_job_count
+            else 0.0,
+            3,
+        ),
+        "average_total_job_seconds_by_platform": average_total_job_seconds_by_platform,
         "average_processing_seconds_by_platform": average_processing_seconds_by_platform,
         "average_step_seconds": average_step_seconds,
         "retry_count_by_platform": retry_count_by_platform,
@@ -180,6 +253,33 @@ def _parse_duration(value) -> float | None:
         return float(str(value))
     except ValueError:
         return None
+
+
+def _parse_timestamp(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _elapsed_seconds(start_value, end_value) -> float | None:
+    start = _parse_timestamp(start_value)
+    end = _parse_timestamp(end_value)
+    if start is None or end is None:
+        return None
+    elapsed = (end - start).total_seconds()
+    if elapsed < 0:
+        return None
+    return elapsed
 
 
 def _safe_source_identity(url: str) -> SourceIdentity | None:

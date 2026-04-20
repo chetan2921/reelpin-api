@@ -4,7 +4,6 @@ from supabase import create_client, Client
 from app.config import get_settings
 from app.models import ProcessingJobStatus
 from app.services.queue_control import (
-    active_platform_counts,
     active_source_keys,
     can_claim_job,
     job_source_key,
@@ -411,6 +410,27 @@ def get_service_health(service_name: str) -> dict | None:
         raise
 
 
+def list_service_health(
+    *,
+    service_name_prefix: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    client = _get_client()
+    try:
+        query = client.table(SERVICE_HEALTH_TABLE).select("*")
+        if service_name_prefix:
+            query = query.like("service_name", f"{service_name_prefix}%")
+        result = query.order("updated_at", desc=True).limit(limit).execute()
+        return result.data
+    except Exception as e:
+        logger.error(
+            "Failed to list service health for prefix %s: %s",
+            service_name_prefix,
+            e,
+        )
+        raise
+
+
 def upsert_processing_cache_entry(cache_data: dict) -> dict:
     client = _get_client()
     now = datetime.now(timezone.utc).isoformat()
@@ -434,6 +454,8 @@ def claim_available_processing_jobs(
     worker_id: str,
     max_jobs: int,
     platform_limits: dict[str, int],
+    current_platform_counts: dict[str, int] | None = None,
+    current_source_keys: set[str] | None = None,
 ) -> list[dict]:
     client = _get_client()
     settings = get_settings()
@@ -458,8 +480,13 @@ def claim_available_processing_jobs(
             .execute()
         )
 
-        platform_counts = active_platform_counts(processing_result.data)
+        platform_counts = {
+            str(platform): int(count)
+            for platform, count in (current_platform_counts or {}).items()
+        }
         source_keys = active_source_keys(processing_result.data)
+        if current_source_keys:
+            source_keys.update(current_source_keys)
         claimed_jobs: list[dict] = []
 
         for job in queued_result.data:
