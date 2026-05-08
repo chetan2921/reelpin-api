@@ -72,174 +72,320 @@ def download_media(url: str) -> DownloadedMedia:
     os.makedirs(download_dir, exist_ok=True)
     cookie_slots, temp_cookie_files = _build_cookie_slots_from_env(url)
     cookie_slots = _ordered_cookie_slots(url, cookie_slots)
-    candidate_slots: list[CookieSlot | None] = []
-    if _is_instagram_url(url):
-        candidate_slots.append(None)
-        if settings.YTDLP_COOKIES_FROM_BROWSER:
-            candidate_slots.append(None)
-        candidate_slots.extend(cookie_slots)
-    else:
-        candidate_slots = list(cookie_slots)
-    if not candidate_slots:
-        candidate_slots = [None]
-    elif not _is_instagram_url(url):
-        candidate_slots.append(None)
-
-    last_error: Exception | None = None
-    apify_attempted = False
 
     try:
-        for candidate_index, selected_cookie_slot in enumerate(candidate_slots):
-            cookie_file = selected_cookie_slot.file_path if selected_cookie_slot else None
-            instagram_cookie_header = (
-                _build_cookie_header(cookie_file, "instagram.com")
-                if _is_instagram_url(url) and cookie_file
-                else None
+        if _is_instagram_url(url):
+            return _download_instagram_media_with_ordered_fallbacks(
+                url,
+                download_dir,
+                settings=settings,
+                cookie_slots=cookie_slots,
             )
-            cookie_slot_index = selected_cookie_slot.index if selected_cookie_slot else None
-
-            output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
-            ydl_opts = {
-                "outtmpl": output_path,
-                "format": _preferred_download_format(url),
-                "quiet": True,
-                "no_warnings": True,
-                "postprocessors": [],
-                "http_headers": _BROWSER_HEADERS,
-                "noplaylist": True,
-            }
-
-            if cookie_file:
-                ydl_opts["cookiefile"] = cookie_file
-                logger.info(
-                    "Using %s cookie slot %s for download",
-                    _platform_name(url),
-                    selected_cookie_slot.label if selected_cookie_slot else "none",
-                )
-
-            use_browser_cookies = (
-                settings.YTDLP_COOKIES_FROM_BROWSER
-                if (not _is_instagram_url(url) and selected_cookie_slot is None)
-                or (_is_instagram_url(url) and candidate_index == 1)
-                else None
-            )
-            is_cookie_free_instagram_attempt = (
-                _is_instagram_url(url)
-                and selected_cookie_slot is None
-            )
-            if use_browser_cookies:
-                ydl_opts["cookiesfrombrowser"] = (settings.YTDLP_COOKIES_FROM_BROWSER,)
-
-            try:
-                slot_public_instagram_error = None
-                if _is_instagram_url(url):
-                    if instagram_cookie_header:
-                        try:
-                            api_media = _download_authenticated_instagram_media(
-                                url,
-                                download_dir,
-                                cookie_header=instagram_cookie_header,
-                            )
-                            if api_media is not None:
-                                api_media.cookie_slot_index = cookie_slot_index
-                                return api_media
-                        except Exception as e:
-                            if _should_try_next_cookie(str(e), has_more_slots=candidate_index < len(candidate_slots) - 1):
-                                logger.warning(
-                                    "Authenticated Instagram API fetch failed for cookie slot %s: %s",
-                                    selected_cookie_slot.label if selected_cookie_slot else "none",
-                                    e,
-                                )
-                                last_error = Exception(str(e))
-                                continue
-                            logger.warning("Authenticated Instagram API fetch failed: %s", e)
-                    try:
-                        public_media = _download_public_instagram_media(
-                            url,
-                            download_dir,
-                            cookie_header=instagram_cookie_header,
-                        )
-                        public_media.cookie_slot_index = cookie_slot_index
-                        return public_media
-                    except Exception as e:
-                        slot_public_instagram_error = str(e)
-                        logger.warning("Public Instagram fetch failed: %s", e)
-                        if not apify_attempted:
-                            apify_attempted = True
-                            apify_media = _try_instagram_apify_fallback(
-                                url,
-                                download_dir,
-                                settings=settings,
-                            )
-                            if apify_media is not None:
-                                return apify_media
-                        if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
-                            last_error = Exception(slot_public_instagram_error)
-                            continue
-                        if _should_try_next_cookie(slot_public_instagram_error, has_more_slots=candidate_index < len(candidate_slots) - 1):
-                            last_error = Exception(slot_public_instagram_error)
-                            continue
-
-                logger.info("Downloading media from: %s", url)
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                    downloaded_file = ydl.prepare_filename(info)
-
-                    if not os.path.exists(downloaded_file):
-                        raise FileNotFoundError(
-                            f"Download completed but file not found at {downloaded_file}"
-                        )
-
-                    caption = str(info.get("description") or "")
-                    logger.info("Downloaded media to: %s", downloaded_file)
-                    return DownloadedMedia(
-                        media_type="video",
-                        media_paths=[downloaded_file],
-                        caption=caption,
-                        cookie_slot_index=cookie_slot_index,
-                    )
-
-            except yt_dlp.utils.DownloadError as e:
-                logger.error("yt-dlp download error: %s", e)
-                friendly_error = _friendly_download_error(
-                    url=url,
-                    raw_message=str(e),
-                    public_instagram_error=slot_public_instagram_error if _is_instagram_url(url) else None,
-                )
-                if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
-                    last_error = Exception(friendly_error)
-                    continue
-                if _should_try_next_cookie(
-                    friendly_error,
-                    has_more_slots=candidate_index < len(candidate_slots) - 1,
-                ):
-                    logger.warning(
-                        "Cookie slot %s failed for %s, trying next slot",
-                        selected_cookie_slot.label if selected_cookie_slot else "anonymous",
-                        _platform_name(url),
-                    )
-                    last_error = Exception(friendly_error)
-                    continue
-                raise Exception(friendly_error)
-            except Exception as e:
-                logger.error("Unexpected download error: %s", e)
-                if is_cookie_free_instagram_attempt and candidate_index < len(candidate_slots) - 1:
-                    last_error = e
-                    continue
-                if _should_try_next_cookie(
-                    str(e),
-                    has_more_slots=candidate_index < len(candidate_slots) - 1,
-                ):
-                    last_error = e
-                    continue
-                raise
-
-        if last_error:
-            raise last_error
-        raise Exception("Download failed without a specific error.")
+        return _download_ytdlp_media_with_cookie_fallbacks(
+            url,
+            download_dir,
+            settings=settings,
+            cookie_slots=cookie_slots,
+        )
     finally:
         for temp_cookie_file in temp_cookie_files:
             cleanup_file(temp_cookie_file)
+
+
+def _download_instagram_media_with_ordered_fallbacks(
+    url: str,
+    download_dir: str,
+    *,
+    settings,
+    cookie_slots: list[CookieSlot],
+) -> DownloadedMedia:
+    attempt_errors: list[tuple[str, str]] = []
+
+    try:
+        return _download_public_instagram_media(url, download_dir)
+    except Exception as e:
+        _record_download_attempt_failure(attempt_errors, "direct_public_instagram", e)
+
+    try:
+        return _download_ytdlp_media(
+            url,
+            download_dir,
+            route_label="direct_anonymous_ytdlp",
+        )
+    except yt_dlp.utils.DownloadError as e:
+        _record_download_attempt_failure(
+            attempt_errors,
+            "direct_anonymous_ytdlp",
+            _friendly_download_error(
+                url=url,
+                raw_message=str(e),
+                public_instagram_error=None,
+            ),
+        )
+    except Exception as e:
+        _record_download_attempt_failure(attempt_errors, "direct_anonymous_ytdlp", e)
+
+    apify_media = _try_instagram_apify_fallback(
+        url,
+        download_dir,
+        settings=settings,
+    )
+    if apify_media is not None:
+        return apify_media
+    attempt_errors.append(
+        ("apify", "Apify was not configured or did not return usable media.")
+    )
+
+    for selected_cookie_slot in cookie_slots:
+        cookie_file = selected_cookie_slot.file_path
+        cookie_header = _build_cookie_header(cookie_file, "instagram.com")
+        cookie_route = f"cookie_slot_{selected_cookie_slot.label}"
+
+        if cookie_header:
+            try:
+                media = _download_authenticated_instagram_media(
+                    url,
+                    download_dir,
+                    cookie_header=cookie_header,
+                )
+                if media is not None:
+                    media.cookie_slot_index = selected_cookie_slot.index
+                    return media
+                attempt_errors.append(
+                    (f"{cookie_route}_api", "Instagram API returned no usable media.")
+                )
+            except Exception as e:
+                _record_download_attempt_failure(
+                    attempt_errors,
+                    f"{cookie_route}_api",
+                    e,
+                )
+
+            try:
+                media = _download_public_instagram_media(
+                    url,
+                    download_dir,
+                    cookie_header=cookie_header,
+                )
+                media.cookie_slot_index = selected_cookie_slot.index
+                return media
+            except Exception as e:
+                _record_download_attempt_failure(
+                    attempt_errors,
+                    f"{cookie_route}_public",
+                    e,
+                )
+
+        try:
+            return _download_ytdlp_media(
+                url,
+                download_dir,
+                cookie_slot=selected_cookie_slot,
+                route_label=f"{cookie_route}_ytdlp",
+            )
+        except yt_dlp.utils.DownloadError as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                f"{cookie_route}_ytdlp",
+                _friendly_download_error(
+                    url=url,
+                    raw_message=str(e),
+                    public_instagram_error=None,
+                ),
+            )
+        except Exception as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                f"{cookie_route}_ytdlp",
+                e,
+            )
+
+    browser_cookie_source = getattr(settings, "YTDLP_COOKIES_FROM_BROWSER", None)
+    if browser_cookie_source:
+        try:
+            return _download_ytdlp_media(
+                url,
+                download_dir,
+                browser_cookie_source=browser_cookie_source,
+                route_label="browser_cookies_ytdlp",
+            )
+        except yt_dlp.utils.DownloadError as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                "browser_cookies_ytdlp",
+                _friendly_download_error(
+                    url=url,
+                    raw_message=str(e),
+                    public_instagram_error=None,
+                ),
+            )
+        except Exception as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                "browser_cookies_ytdlp",
+                e,
+            )
+
+    raise Exception(_download_attempt_summary("Instagram", attempt_errors))
+
+
+def _download_ytdlp_media_with_cookie_fallbacks(
+    url: str,
+    download_dir: str,
+    *,
+    settings,
+    cookie_slots: list[CookieSlot],
+) -> DownloadedMedia:
+    attempt_errors: list[tuple[str, str]] = []
+
+    try:
+        return _download_ytdlp_media(
+            url,
+            download_dir,
+            route_label="direct_anonymous_ytdlp",
+        )
+    except yt_dlp.utils.DownloadError as e:
+        _record_download_attempt_failure(
+            attempt_errors,
+            "direct_anonymous_ytdlp",
+            _friendly_download_error(
+                url=url,
+                raw_message=str(e),
+                public_instagram_error=None,
+            ),
+        )
+    except Exception as e:
+        _record_download_attempt_failure(attempt_errors, "direct_anonymous_ytdlp", e)
+
+    for selected_cookie_slot in cookie_slots:
+        try:
+            return _download_ytdlp_media(
+                url,
+                download_dir,
+                cookie_slot=selected_cookie_slot,
+                route_label=f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
+            )
+        except yt_dlp.utils.DownloadError as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
+                _friendly_download_error(
+                    url=url,
+                    raw_message=str(e),
+                    public_instagram_error=None,
+                ),
+            )
+        except Exception as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
+                e,
+            )
+
+    browser_cookie_source = getattr(settings, "YTDLP_COOKIES_FROM_BROWSER", None)
+    if browser_cookie_source:
+        try:
+            return _download_ytdlp_media(
+                url,
+                download_dir,
+                browser_cookie_source=browser_cookie_source,
+                route_label="browser_cookies_ytdlp",
+            )
+        except yt_dlp.utils.DownloadError as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                "browser_cookies_ytdlp",
+                _friendly_download_error(
+                    url=url,
+                    raw_message=str(e),
+                    public_instagram_error=None,
+                ),
+            )
+        except Exception as e:
+            _record_download_attempt_failure(
+                attempt_errors,
+                "browser_cookies_ytdlp",
+                e,
+            )
+
+    raise Exception(_download_attempt_summary(_platform_name(url), attempt_errors))
+
+
+def _download_ytdlp_media(
+    url: str,
+    download_dir: str,
+    *,
+    cookie_slot: CookieSlot | None = None,
+    browser_cookie_source: str | None = None,
+    route_label: str,
+) -> DownloadedMedia:
+    output_path = os.path.join(download_dir, "%(id)s.%(ext)s")
+    ydl_opts = {
+        "outtmpl": output_path,
+        "format": _preferred_download_format(url),
+        "quiet": True,
+        "no_warnings": True,
+        "postprocessors": [],
+        "http_headers": _BROWSER_HEADERS,
+        "noplaylist": True,
+    }
+
+    cookie_slot_index = None
+    if cookie_slot:
+        ydl_opts["cookiefile"] = cookie_slot.file_path
+        cookie_slot_index = cookie_slot.index
+        logger.info(
+            "Using %s cookie slot %s for download",
+            _platform_name(url),
+            cookie_slot.label,
+        )
+
+    if browser_cookie_source:
+        ydl_opts["cookiesfrombrowser"] = (browser_cookie_source,)
+
+    logger.info("Downloading media from %s via %s", url, route_label)
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        downloaded_file = ydl.prepare_filename(info)
+
+        if not os.path.exists(downloaded_file):
+            raise FileNotFoundError(
+                f"Download completed but file not found at {downloaded_file}"
+            )
+
+        caption = str(info.get("description") or "")
+        logger.info("Downloaded media to: %s", downloaded_file)
+        return DownloadedMedia(
+            media_type="video",
+            media_paths=[downloaded_file],
+            caption=caption,
+            cookie_slot_index=cookie_slot_index,
+        )
+
+
+def _record_download_attempt_failure(
+    attempt_errors: list[tuple[str, str]],
+    route: str,
+    error,
+) -> None:
+    message = str(error)
+    attempt_errors.append((route, message))
+    logger.warning("Download route %s failed: %s", route, message)
+
+
+def _download_attempt_summary(
+    platform: str,
+    attempt_errors: list[tuple[str, str]],
+) -> str:
+    if not attempt_errors:
+        return f"{platform} extraction failed without a specific error."
+
+    last_route, last_error = attempt_errors[-1]
+    attempted_routes = ", ".join(route for route, _ in attempt_errors)
+    return (
+        f"{platform} extraction failed after trying {attempted_routes}. "
+        f"Last failure from {last_route}: {last_error}"
+    )
 
 
 def download_reel(url: str) -> tuple[str, str]:
@@ -729,28 +875,6 @@ def _friendly_download_error(
         f"Failed to download this media from {platform}. "
         "It may be private, unavailable, or temporarily blocked."
     )
-
-
-def _should_try_next_cookie(message: str, *, has_more_slots: bool) -> bool:
-    if not has_more_slots:
-        return False
-
-    lowered = message.lower()
-    retry_patterns = [
-        "login required",
-        "authenticated cookies",
-        "blocked anonymous download",
-        "fresh authenticated session",
-        "cookie",
-        "cookies",
-        "unauthorized",
-        "forbidden",
-        "429",
-        "rate limit",
-        "rate-limit",
-        "too many requests",
-    ]
-    return any(pattern in lowered for pattern in retry_patterns)
 
 
 def _build_cookie_slots_from_env(url: str) -> tuple[list[CookieSlot], list[str]]:

@@ -53,6 +53,7 @@ class _FakeHTTPResponse:
 
 
 class DownloaderTests(unittest.TestCase):
+    @patch("app.services.downloader._download_ytdlp_media")
     @patch("app.services.downloader._download_authenticated_instagram_media")
     @patch("app.services.downloader._try_instagram_apify_fallback")
     @patch("app.services.downloader._download_public_instagram_media")
@@ -69,6 +70,7 @@ class DownloaderTests(unittest.TestCase):
         mock_public_fetch,
         mock_apify_fallback,
         mock_authenticated_fetch,
+        mock_ytdlp_fetch,
     ):
         with tempfile.TemporaryDirectory() as download_dir:
             mock_get_settings.return_value = SimpleNamespace(
@@ -87,6 +89,7 @@ class DownloaderTests(unittest.TestCase):
             mock_public_fetch.side_effect = Exception(
                 "Instagram did not expose a public media URL for this page."
             )
+            mock_ytdlp_fetch.side_effect = Exception("anonymous yt-dlp failed")
             mock_apify_fallback.return_value = DownloadedMedia(
                 media_type="video",
                 media_paths=[f"{download_dir}/apify-video.mp4"],
@@ -100,6 +103,64 @@ class DownloaderTests(unittest.TestCase):
         mock_apify_fallback.assert_called_once()
         mock_public_fetch.assert_called_once()
         mock_authenticated_fetch.assert_not_called()
+        mock_ytdlp_fetch.assert_called_once()
+
+    @patch("app.services.downloader._download_ytdlp_media")
+    @patch("app.services.downloader._download_authenticated_instagram_media")
+    @patch("app.services.downloader._try_instagram_apify_fallback")
+    @patch("app.services.downloader._download_public_instagram_media")
+    @patch("app.services.downloader._ordered_cookie_slots")
+    @patch("app.services.downloader._build_cookie_slots_from_env")
+    @patch("app.services.downloader.get_settings")
+    def test_download_media_uses_cookies_after_direct_and_apify_fail(
+        self,
+        mock_get_settings,
+        mock_build_cookie_slots,
+        mock_ordered_cookie_slots,
+        mock_public_fetch,
+        mock_apify_fallback,
+        mock_authenticated_fetch,
+        mock_ytdlp_fetch,
+    ):
+        with tempfile.TemporaryDirectory() as download_dir:
+            cookie_file = f"{download_dir}/instagram-cookies.txt"
+            with open(cookie_file, "w", encoding="utf-8") as handle:
+                handle.write(
+                    ".instagram.com\tTRUE\t/\tTRUE\t0\tsessionid\ttest-session\n"
+                )
+            mock_get_settings.return_value = SimpleNamespace(
+                TEMP_DOWNLOAD_DIR=download_dir,
+                YTDLP_COOKIES_FROM_BROWSER=None,
+                APIFY_API_TOKEN="apify_api_test",
+                APIFY_INSTAGRAM_ACTOR_ID="apify/instagram-scraper",
+            )
+            cookie_slot = CookieSlot(
+                index=1,
+                label="active",
+                file_path=cookie_file,
+            )
+            mock_build_cookie_slots.return_value = ([cookie_slot], [])
+            mock_ordered_cookie_slots.return_value = [cookie_slot]
+            mock_public_fetch.side_effect = Exception("public failed")
+            mock_ytdlp_fetch.side_effect = [
+                Exception("anonymous yt-dlp failed"),
+                DownloadedMedia(
+                    media_type="video",
+                    media_paths=[f"{download_dir}/cookie-video.mp4"],
+                    caption="Cookie caption",
+                    cookie_slot_index=1,
+                ),
+            ]
+            mock_apify_fallback.return_value = None
+            mock_authenticated_fetch.return_value = None
+
+            media = downloader.download_media("https://www.instagram.com/reel/ABC123/")
+
+        self.assertEqual(media.caption, "Cookie caption")
+        self.assertEqual(media.cookie_slot_index, 1)
+        self.assertEqual(mock_ytdlp_fetch.call_count, 2)
+        mock_apify_fallback.assert_called_once()
+        mock_authenticated_fetch.assert_called_once()
 
     @patch("app.services.downloader._download_remote_file")
     @patch("app.services.downloader.urllib.request.urlopen")
