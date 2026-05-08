@@ -131,10 +131,6 @@ ON processing_jobs(claimed_by);
 CREATE INDEX IF NOT EXISTS idx_processing_jobs_source_identity
 ON processing_jobs(user_id, source_platform, source_content_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_processing_job_per_source
-ON processing_jobs(user_id, source_platform, source_content_id)
-WHERE status IN ('queued', 'processing');
-
 CREATE TABLE IF NOT EXISTS service_health (
     service_name TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'unknown',
