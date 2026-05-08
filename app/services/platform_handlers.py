@@ -28,13 +28,9 @@ def prepare_content_for_source(
         return _prepare_instagram_reel(source, mark=mark)
     if handler_key == "instagram_post":
         return _prepare_instagram_post(source, mark=mark)
-    if handler_key == "youtube_short":
-        return _prepare_youtube_short(source, mark=mark)
-    if handler_key == "youtube_video":
-        return _prepare_youtube_video(source, mark=mark)
-    if handler_key == "tiktok":
-        return _prepare_tiktok(source, mark=mark)
-    return _prepare_generic_web(source, mark=mark)
+    raise ValueError(
+        f"Unsupported Instagram content type: {source.source_content_type!r}."
+    )
 
 
 def platform_handler_key(source: SourceIdentity) -> str:
@@ -42,13 +38,9 @@ def platform_handler_key(source: SourceIdentity) -> str:
         return "instagram_reel"
     if source.source_platform == "instagram" and source.source_content_type in {"post", "page"}:
         return "instagram_post"
-    if source.source_platform == "youtube" and source.source_content_type == "short":
-        return "youtube_short"
-    if source.source_platform == "youtube":
-        return "youtube_video"
-    if source.source_platform == "tiktok":
-        return "tiktok"
-    return "web"
+    raise ValueError(
+        f"Unsupported source for Instagram-only pipeline: {source.source_platform}/{source.source_content_type}"
+    )
 
 
 def _prepare_instagram_reel(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
@@ -81,94 +73,6 @@ def _prepare_instagram_post(source: SourceIdentity, *, mark) -> PreparedPlatform
         caption=downloaded.caption,
         media_paths=downloaded.media_paths,
         ingestion_method="instagram_post_pipeline",
-        transcript_source=transcript_source,
-        step_durations={
-            "download_seconds": download_seconds,
-            "transcribe_seconds": second_step_seconds,
-        },
-        cookie_slot_index=downloaded.cookie_slot_index,
-    )
-
-
-def _prepare_youtube_short(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    downloaded, download_seconds = _download_platform_media(source, mark=mark)
-    if downloaded.media_type == "image":
-        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
-        transcript_source = "groq_vision_ocr"
-    else:
-        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
-        transcript_source = "groq_whisper"
-    return PreparedPlatformContent(
-        transcript_text=transcript_text,
-        caption=downloaded.caption,
-        media_paths=downloaded.media_paths,
-        ingestion_method="youtube_short_pipeline",
-        transcript_source=transcript_source,
-        step_durations={
-            "download_seconds": download_seconds,
-            "transcribe_seconds": second_step_seconds,
-        },
-        cookie_slot_index=downloaded.cookie_slot_index,
-    )
-
-
-def _prepare_youtube_video(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    downloaded, download_seconds = _download_platform_media(source, mark=mark)
-    if downloaded.media_type == "image":
-        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
-        transcript_source = "groq_vision_ocr"
-    else:
-        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
-        transcript_source = "groq_whisper"
-    return PreparedPlatformContent(
-        transcript_text=transcript_text,
-        caption=downloaded.caption,
-        media_paths=downloaded.media_paths,
-        ingestion_method="youtube_video_pipeline",
-        transcript_source=transcript_source,
-        step_durations={
-            "download_seconds": download_seconds,
-            "transcribe_seconds": second_step_seconds,
-        },
-        cookie_slot_index=downloaded.cookie_slot_index,
-    )
-
-
-def _prepare_tiktok(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    downloaded, download_seconds = _download_platform_media(source, mark=mark)
-    if downloaded.media_type == "image":
-        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
-        transcript_source = "groq_vision_ocr"
-    else:
-        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
-        transcript_source = "groq_whisper"
-    return PreparedPlatformContent(
-        transcript_text=transcript_text,
-        caption=downloaded.caption,
-        media_paths=downloaded.media_paths,
-        ingestion_method="tiktok_pipeline",
-        transcript_source=transcript_source,
-        step_durations={
-            "download_seconds": download_seconds,
-            "transcribe_seconds": second_step_seconds,
-        },
-        cookie_slot_index=downloaded.cookie_slot_index,
-    )
-
-
-def _prepare_generic_web(source: SourceIdentity, *, mark) -> PreparedPlatformContent:
-    downloaded, download_seconds = _download_platform_media(source, mark=mark)
-    if downloaded.media_type == "image":
-        transcript_text, second_step_seconds = _prepare_downloaded_images(downloaded, mark=mark)
-        transcript_source = "groq_vision_ocr"
-    else:
-        transcript_text, second_step_seconds = _prepare_downloaded_video(downloaded, mark=mark)
-        transcript_source = "groq_whisper"
-    return PreparedPlatformContent(
-        transcript_text=transcript_text,
-        caption=downloaded.caption,
-        media_paths=downloaded.media_paths,
-        ingestion_method="web_pipeline",
         transcript_source=transcript_source,
         step_durations={
             "download_seconds": download_seconds,

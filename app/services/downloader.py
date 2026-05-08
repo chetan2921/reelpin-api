@@ -63,10 +63,13 @@ class CookieSlot:
 
 def download_media(url: str) -> DownloadedMedia:
     """
-    Download supported media from Instagram, YouTube, or TikTok.
+    Download Instagram media (reel, post, or carousel).
 
     Returns either a video payload or an image-post payload.
     """
+    if not _is_instagram_url(url):
+        raise ValueError("Only Instagram URLs are supported.")
+
     settings = get_settings()
     download_dir = settings.TEMP_DOWNLOAD_DIR
     os.makedirs(download_dir, exist_ok=True)
@@ -74,14 +77,7 @@ def download_media(url: str) -> DownloadedMedia:
     cookie_slots = _ordered_cookie_slots(url, cookie_slots)
 
     try:
-        if _is_instagram_url(url):
-            return _download_instagram_media_with_ordered_fallbacks(
-                url,
-                download_dir,
-                settings=settings,
-                cookie_slots=cookie_slots,
-            )
-        return _download_ytdlp_media_with_cookie_fallbacks(
+        return _download_instagram_media_with_ordered_fallbacks(
             url,
             download_dir,
             settings=settings,
@@ -227,88 +223,6 @@ def _download_instagram_media_with_ordered_fallbacks(
             )
 
     raise Exception(_download_attempt_summary("Instagram", attempt_errors))
-
-
-def _download_ytdlp_media_with_cookie_fallbacks(
-    url: str,
-    download_dir: str,
-    *,
-    settings,
-    cookie_slots: list[CookieSlot],
-) -> DownloadedMedia:
-    attempt_errors: list[tuple[str, str]] = []
-
-    try:
-        return _download_ytdlp_media(
-            url,
-            download_dir,
-            route_label="direct_anonymous_ytdlp",
-        )
-    except yt_dlp.utils.DownloadError as e:
-        _record_download_attempt_failure(
-            attempt_errors,
-            "direct_anonymous_ytdlp",
-            _friendly_download_error(
-                url=url,
-                raw_message=str(e),
-                public_instagram_error=None,
-            ),
-        )
-    except Exception as e:
-        _record_download_attempt_failure(attempt_errors, "direct_anonymous_ytdlp", e)
-
-    for selected_cookie_slot in cookie_slots:
-        try:
-            return _download_ytdlp_media(
-                url,
-                download_dir,
-                cookie_slot=selected_cookie_slot,
-                route_label=f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
-            )
-        except yt_dlp.utils.DownloadError as e:
-            _record_download_attempt_failure(
-                attempt_errors,
-                f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
-                _friendly_download_error(
-                    url=url,
-                    raw_message=str(e),
-                    public_instagram_error=None,
-                ),
-            )
-        except Exception as e:
-            _record_download_attempt_failure(
-                attempt_errors,
-                f"cookie_slot_{selected_cookie_slot.label}_ytdlp",
-                e,
-            )
-
-    browser_cookie_source = getattr(settings, "YTDLP_COOKIES_FROM_BROWSER", None)
-    if browser_cookie_source:
-        try:
-            return _download_ytdlp_media(
-                url,
-                download_dir,
-                browser_cookie_source=browser_cookie_source,
-                route_label="browser_cookies_ytdlp",
-            )
-        except yt_dlp.utils.DownloadError as e:
-            _record_download_attempt_failure(
-                attempt_errors,
-                "browser_cookies_ytdlp",
-                _friendly_download_error(
-                    url=url,
-                    raw_message=str(e),
-                    public_instagram_error=None,
-                ),
-            )
-        except Exception as e:
-            _record_download_attempt_failure(
-                attempt_errors,
-                "browser_cookies_ytdlp",
-                e,
-            )
-
-    raise Exception(_download_attempt_summary(_platform_name(url), attempt_errors))
 
 
 def _download_ytdlp_media(
@@ -1022,34 +936,15 @@ def _decode_cookie_blob(*, encoded: str | None, plain: str | None, encoded_label
 
 
 def _platform_key(url: str) -> str:
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if "instagram" in host:
-        return "instagram"
-    if "youtube" in host or "youtu.be" in host:
-        return "youtube"
-    if "tiktok" in host:
-        return "tiktok"
-    return "ytdlp"
+    return "instagram"
 
 
 def _preferred_download_format(url: str) -> str:
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if "youtube" in host or "youtu.be" in host:
-        return "bestaudio/best"
-    if "instagram" in host or "tiktok" in host:
-        return "bestaudio/best[height<=360]/best"
-    return "bestaudio/best"
+    return "bestaudio/best[height<=360]/best"
 
 
 def _platform_name(url: str) -> str:
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if "instagram" in host:
-        return "Instagram"
-    if "youtube" in host or "youtu.be" in host:
-        return "YouTube"
-    if "tiktok" in host:
-        return "TikTok"
-    return "the source platform"
+    return "Instagram"
 
 
 def _is_instagram_url(url: str) -> bool:

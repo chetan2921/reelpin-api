@@ -1,23 +1,25 @@
-# ReelPin AI Backend 🚀
+# ReelPin AI Backend
 
-The intelligent FastAPI backend driving the **ReelPin** app. This system downloads, transcribes, categorizes, and semantically embeds short-form video content (Instagram Reels) directly into a structured PostgreSQL and Pinecone Vector database.
+The FastAPI backend driving the **ReelPin** app. Instagram-only: this system downloads, transcribes, categorizes, and semantically embeds Instagram reels and image posts into PostgreSQL and Pinecone.
+
+> **Scope:** Instagram URLs only (reels, posts, IGTV). Non-Instagram URLs (YouTube, TikTok, generic web) are rejected with HTTP 400.
 
 ## Architecture & Pipeline
-Whenever a user shares an Instagram Reel to the app, the backend executes the following automated pipeline:
+When a user shares an Instagram URL, the backend runs:
 
-1. **Downloader**: Uses `yt-dlp` to download the HD video and scrape the exact Instagram caption context.
-2. **Transcriber**: Uses Llama Whisper (via Groq) to strip the audio off the `.mp4` and generate a near-instant transcript.
-3. **AI Extractor**: Passes the combined transcript + caption through an ultra-fast Llama 3 LLM prompt. The AI maps the reel into a massive 46-Category Matrix, extracts key actionable facts, and pulls physical locations.
-4. **Geocoding Engine**: Any locations found are piped into the **Google Maps Geocoding API** for exact latitude/longitude extraction (with intelligent neighborhood fallback routing).
-5. **Database Core**: The finalized structured payload is written permanently into a Supabase PostgreSQL remote database.
-6. **Vector Search (RAG)**: The transcript, category, and summary are embedded and stored in **Pinecone**, allowing users to perform complex natural language queries on their saved reels (e.g. *"Show me that spicy chicken spot from yesterday"*).
+1. **Downloader**: Public page fetch, then yt-dlp anonymous, then an Apify fallback, then per-cookie-slot authenticated and yt-dlp routes. Image carousels are handled alongside videos.
+2. **Transcriber**: Groq Whisper transcribes audio for video posts; image posts go through Groq vision OCR instead.
+3. **AI Extractor**: A Groq Llama prompt produces a structured JSON payload (title, summary, content domain, topical tags, key facts, locations, people, actionable items).
+4. **Geocoding**: Locations are sent to the Google Maps Geocoding API and cached in Supabase `geocode_cache`.
+5. **Database**: The structured payload is written to the Supabase `reels` table.
+6. **Vector search**: Title, summary, transcript, and category are embedded (hashed-lexical 384-dim) and upserted into Pinecone for RAG-style natural-language search.
 
 ## Tech Stack
 - **Framework**: FastAPI (Python)
 - **AI/LLM Engine**: Groq (Llama 3 70B & Whisper-v3)
 - **Database**: Supabase (PostgreSQL)
 - **Vector Search**: Pinecone
-- **Scraping**: `yt-dlp`
+- **Scraping**: yt-dlp + direct Instagram page/API + Apify fallback
 - **Geocoding**: Google Maps API
 
 ## Local Development Setup
@@ -47,10 +49,12 @@ Whenever a user shares an Instagram Reel to the app, the backend executes the fo
    - `GOOGLE_MAPS_API_KEY`
    - `SUPABASE_URL` & `SUPABASE_SERVICE_ROLE_KEY`
 
-   For authenticated media downloads, prefer the new active and backup slot envs:
+   For authenticated Instagram downloads, set the active and backup cookie slots:
    - `INSTAGRAM_ACTIVE_COOKIE_DATA_BASE64` or `INSTAGRAM_ACTIVE_COOKIES_FILE`
    - `INSTAGRAM_BACKUP_COOKIE_DATA_BASE64` or `INSTAGRAM_BACKUP_COOKIES_FILE`
-   - equivalent `YOUTUBE_*`, `TIKTOK_*`, and `YTDLP_*` active and backup vars when needed
+   - `INSTAGRAM_TERTIARY_*` for a third standby slot (optional)
+
+   The `YOUTUBE_*`, `TIKTOK_*`, `YTDLP_*`, and `APIFY_*` env fields still exist in `Settings` for backward compatibility but are no longer read by the pipeline.
 
    Safe cookie rotation steps:
    1. Load the new cookie into the backup slot.
@@ -67,7 +71,8 @@ Whenever a user shares an Instagram Reel to the app, the backend executes the fo
 ## API Endpoints Overview
 
 - `GET /api/v1/health` - Check system status.
-- `POST /api/v1/process-reel` - Send a raw Instagram Reel URL through the 5-step analysis pipeline.
+- `POST /api/v1/process-reel` - Send an Instagram URL (reel or post) through the synchronous pipeline.
+- `POST /api/v1/processing-jobs/reels` - Queue an Instagram URL for the worker; poll `/api/v1/processing-jobs/{id}` for status.
 - `POST /api/v1/process-video` - Manually upload a direct `.mp4` bypassing the scraper.
 - `GET /api/v1/reels` - Paginated fetch of saved reels.
 - `POST /api/v1/search` - RAG semantic vector search.
@@ -87,8 +92,8 @@ For Railway:
 - Worker service should use `python start_service.py`
 - worker service must set `SERVICE_MODE=worker`
 - both services need the same environment variables
-- worker polls the `processing_jobs` table directly, so `REDIS_URL` is optional and only kept for older Redis-based deployments
-- worker tuning env vars are `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_RECOVERY_INTERVAL_SECONDS`, `WORKER_HEARTBEAT_INTERVAL_SECONDS`, `WORKER_STALE_JOB_MINUTES`, `WORKER_CONCURRENCY`, `WORKER_INSTAGRAM_CONCURRENCY`, `WORKER_TIKTOK_CONCURRENCY`, `WORKER_YOUTUBE_CONCURRENCY`, and `WORKER_WEB_CONCURRENCY`
+- worker polls the `processing_jobs` table directly; `REDIS_URL` is unused
+- worker tuning env vars are `WORKER_POLL_INTERVAL_SECONDS`, `WORKER_RECOVERY_INTERVAL_SECONDS`, `WORKER_HEARTBEAT_INTERVAL_SECONDS`, `WORKER_STALE_JOB_MINUTES`, `WORKER_CONCURRENCY`, and `WORKER_INSTAGRAM_CONCURRENCY` (the `_TIKTOK_`, `_YOUTUBE_`, `_WEB_` concurrency vars are no longer read)
 
 ---
 *Built tightly for the ReelPin Flutter application.*

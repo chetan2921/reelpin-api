@@ -1,0 +1,63 @@
+name: reelpin-api
+region: nyc
+
+services:
+  - name: web
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    http_port: 8000
+    run_command: python start_service.py
+    source_dir: /
+    github:
+      repo: chetan2921/reelpin-api
+      branch: main
+      deploy_on_push: true
+    health_check:
+      http_path: /api/v1/health/live
+      initial_delay_seconds: 20
+      period_seconds: 30
+      timeout_seconds: 5
+      success_threshold: 1
+      failure_threshold: 3
+    routes:
+      - path: /
+    envs:
+      - key: SERVICE_MODE
+        value: api
+
+workers:
+  - name: worker
+    instance_size_slug: basic-xxs
+    instance_count: 1
+    run_command: python start_service.py
+    source_dir: /
+    github:
+      repo: chetan2921/reelpin-api
+      branch: main
+      deploy_on_push: true
+    envs:
+      - key: SERVICE_MODE
+        value: worker
+      - key: WORKER_CONCURRENCY
+        value: "4"
+      - key: WORKER_INSTAGRAM_CONCURRENCY
+        value: "2"
+      - key: WORKER_POLL_INTERVAL_SECONDS
+        value: "2"
+      - key: WORKER_STALE_JOB_MINUTES
+        value: "10"
+
+# Set these as scope=RUN_AND_BUILD_TIME secrets in the DO dashboard,
+# applied to BOTH the web service and the worker:
+#   GROQ_API_KEY
+#   GOOGLE_MAPS_API_KEY
+#   PINECONE_API_KEY
+#   PINECONE_INDEX_NAME
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
+#   FIREBASE_SERVICE_ACCOUNT_JSON
+#   INSTAGRAM_ACTIVE_COOKIE_DATA_BASE64
+#   INSTAGRAM_BACKUP_COOKIE_DATA_BASE64
+#   ADMIN_DASHBOARD_KEY
+#   APIFY_API_TOKEN          (optional)
+#   APIFY_INSTAGRAM_ACTOR_ID (optional)

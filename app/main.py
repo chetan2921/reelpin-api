@@ -36,6 +36,7 @@ from app.models import (
 from app.pipeline import process_reel_pipeline, process_video_pipeline
 from app.services.embedder import init_pinecone, search_similar
 from app.services.database import (
+    DuplicateProcessingJobError,
     create_completed_processing_job,
     create_processing_job,
     count_processing_jobs_by_status_for_user,
@@ -417,17 +418,38 @@ async def enqueue_reel_processing(payload: EnqueueReelJobInput):
 
         _enforce_submission_limits(payload.user_id)
 
-        job = create_processing_job(
-            user_id=payload.user_id,
-            url=source.normalized_url,
-            normalized_url=source.normalized_url,
-            source_platform=source.source_platform,
-            source_content_type=source.source_content_type,
-            source_content_id=source.source_content_id,
-            processing_version=PROCESSING_VERSION,
-            ingestion_method="url_share",
-            max_attempts=settings.PROCESSING_JOB_DEFAULT_MAX_ATTEMPTS,
-        )
+        try:
+            job = create_processing_job(
+                user_id=payload.user_id,
+                url=source.normalized_url,
+                normalized_url=source.normalized_url,
+                source_platform=source.source_platform,
+                source_content_type=source.source_content_type,
+                source_content_id=source.source_content_id,
+                processing_version=PROCESSING_VERSION,
+                ingestion_method="url_share",
+                max_attempts=settings.PROCESSING_JOB_DEFAULT_MAX_ATTEMPTS,
+            )
+        except DuplicateProcessingJobError as dup:
+            if dup.existing_job:
+                log_processing_event(
+                    logger,
+                    "api.processing_job.duplicate_submission",
+                    job_id=dup.existing_job.get("id"),
+                    user_id=payload.user_id,
+                    url=source.normalized_url,
+                    source=source,
+                    processing_step=str(dup.existing_job.get("current_step") or "queued"),
+                    status=str(dup.existing_job.get("status") or "queued"),
+                )
+                return _db_job_to_response(dup.existing_job)
+            raise ApiResponseError(
+                status_code=409,
+                error_code="duplicate_submission",
+                message="This reel is already being processed.",
+                detail="A processing job already exists for this URL.",
+                retryable=False,
+            )
         log_processing_event(
             logger,
             "api.processing_job.created",
@@ -441,6 +463,8 @@ async def enqueue_reel_processing(payload: EnqueueReelJobInput):
             max_attempts=int(job.get("max_attempts", 0) or 0),
         )
         return _db_job_to_response(job)
+    except ApiResponseError:
+        raise
     except ValueError as e:
         raise ApiResponseError(
             status_code=400,

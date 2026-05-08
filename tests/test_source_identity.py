@@ -17,39 +17,24 @@ class SourceIdentityTests(unittest.TestCase):
             "https://www.instagram.com/reel/C8abc123/",
         )
 
-    def test_youtube_shorts_and_watch_urls_collapse_to_same_video(self):
-        shorts_identity = resolve_source_identity(
-            "https://youtube.com/shorts/abc123XYZ09?feature=share"
-        )
-        watch_identity = resolve_source_identity(
-            "https://www.youtube.com/watch?v=abc123XYZ09&si=foo"
-        )
+    def test_instagram_post_normalizes_to_canonical_path(self):
+        identity = resolve_source_identity("https://instagr.am/p/C8xyz999/?igsh=foo")
 
-        self.assertEqual(
-            shorts_identity.normalized_url,
-            "https://www.youtube.com/watch?v=abc123XYZ09",
-        )
-        self.assertEqual(shorts_identity.normalized_url, watch_identity.normalized_url)
-        self.assertEqual(shorts_identity.source_content_type, "short")
-
-    def test_tiktok_short_links_normalize_to_share_path(self):
-        identity = resolve_source_identity("https://vm.tiktok.com/ZM123abc/?utm_source=copy")
-
-        self.assertEqual(identity.source_platform, "tiktok")
-        self.assertEqual(identity.source_content_type, "share")
-        self.assertEqual(identity.source_content_id, "ZM123abc")
+        self.assertEqual(identity.source_platform, "instagram")
+        self.assertEqual(identity.source_content_type, "post")
+        self.assertEqual(identity.source_content_id, "C8xyz999")
         self.assertEqual(
             identity.normalized_url,
-            "https://www.tiktok.com/t/ZM123abc",
+            "https://www.instagram.com/p/C8xyz999/",
         )
 
-    def test_generic_urls_are_sorted_and_tracking_params_removed(self):
-        identity = resolve_source_identity(
-            "https://Example.com/path/?b=2&utm_medium=social&a=1"
-        )
+    def test_non_instagram_url_raises(self):
+        with self.assertRaises(ValueError):
+            resolve_source_identity("https://www.youtube.com/watch?v=abc123XYZ09")
 
-        self.assertEqual(identity.source_platform, "web")
-        self.assertEqual(identity.normalized_url, "https://example.com/path?a=1&b=2")
+    def test_blank_url_raises(self):
+        with self.assertRaises(ValueError):
+            resolve_source_identity("")
 
 
 if __name__ == "__main__":

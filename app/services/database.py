@@ -23,6 +23,22 @@ GEOCODE_CACHE_TABLE = "geocode_cache"
 URL_MATCH_FALLBACK_LIMIT = 100
 
 
+class DuplicateProcessingJobError(Exception):
+    """Raised when an active processing job already exists for the same source."""
+
+    def __init__(self, existing_job: dict | None, message: str):
+        super().__init__(message)
+        self.existing_job = existing_job
+
+
+def _is_unique_violation(error: Exception) -> bool:
+    code = getattr(error, "code", None)
+    if code == "23505":
+        return True
+    message = str(error).lower()
+    return "23505" in message or "duplicate key value" in message or "unique constraint" in message
+
+
 def _get_client() -> Client:
     """Get or create the Supabase client."""
     global _supabase_client
@@ -114,6 +130,10 @@ ON processing_jobs(claimed_by);
 
 CREATE INDEX IF NOT EXISTS idx_processing_jobs_source_identity
 ON processing_jobs(user_id, source_platform, source_content_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_active_processing_job_per_source
+ON processing_jobs(user_id, source_platform, source_content_id)
+WHERE status IN ('queued', 'processing');
 
 CREATE TABLE IF NOT EXISTS service_health (
     service_name TEXT PRIMARY KEY,
@@ -239,6 +259,17 @@ def create_processing_job(
         ).execute()
         return result.data[0]
     except Exception as e:
+        if _is_unique_violation(e) and source_content_id:
+            existing = find_processing_job_by_user_and_source_identity(
+                user_id=user_id,
+                source_platform=source_platform,
+                source_content_id=source_content_id,
+                statuses=[
+                    ProcessingJobStatus.queued.value,
+                    ProcessingJobStatus.processing.value,
+                ],
+            )
+            raise DuplicateProcessingJobError(existing, str(e))
         logger.error(f"Failed to create processing job: {e}")
         raise
 

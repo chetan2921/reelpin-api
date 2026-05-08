@@ -21,12 +21,22 @@ class QueueControlTests(unittest.TestCase):
     def test_job_platform_prefers_url_identity(self):
         platform = job_platform(
             {
-                "url": "https://www.youtube.com/watch?v=abc123",
+                "url": "https://www.instagram.com/reel/ABC123/",
                 "source_platform": "web",
             }
         )
 
-        self.assertEqual(platform, "youtube")
+        self.assertEqual(platform, "instagram")
+
+    def test_job_platform_falls_back_to_stored_value_for_unparseable_url(self):
+        platform = job_platform(
+            {
+                "url": "https://www.youtube.com/watch?v=abc123",
+                "source_platform": "instagram",
+            }
+        )
+
+        self.assertEqual(platform, "instagram")
 
     def test_can_claim_job_blocks_duplicate_source(self):
         processing_jobs = [
@@ -39,7 +49,7 @@ class QueueControlTests(unittest.TestCase):
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 2, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             )
         )
         self.assertEqual(
@@ -47,24 +57,24 @@ class QueueControlTests(unittest.TestCase):
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 2, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             ),
             "duplicate_source",
         )
 
     def test_can_claim_job_blocks_platform_when_at_capacity(self):
         processing_jobs = [
-            {"url": "https://www.youtube.com/watch?v=abc123"},
-            {"url": "https://www.youtube.com/watch?v=def456"},
+            {"url": "https://www.instagram.com/reel/ABC123/"},
+            {"url": "https://www.instagram.com/reel/DEF456/"},
         ]
-        queued_job = {"url": "https://youtu.be/ghi789"}
+        queued_job = {"url": "https://www.instagram.com/reel/GHI789/"}
 
         self.assertFalse(
             can_claim_job(
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 1, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             )
         )
         self.assertEqual(
@@ -72,23 +82,23 @@ class QueueControlTests(unittest.TestCase):
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 1, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             ),
             "platform_capacity",
         )
 
     def test_can_claim_job_allows_distinct_source_under_platform_limit(self):
         processing_jobs = [
-            {"url": "https://www.tiktok.com/@creator/video/123"}
+            {"url": "https://www.instagram.com/reel/ABC123/"}
         ]
-        queued_job = {"url": "https://www.youtube.com/watch?v=abc123"}
+        queued_job = {"url": "https://www.instagram.com/reel/DEF456/"}
 
         self.assertTrue(
             can_claim_job(
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 1, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             )
         )
         self.assertIsNone(
@@ -96,7 +106,7 @@ class QueueControlTests(unittest.TestCase):
                 queued_job,
                 current_platform_counts=active_platform_counts(processing_jobs),
                 current_source_keys=active_source_keys(processing_jobs),
-                platform_limits={"instagram": 1, "youtube": 2, "tiktok": 1, "web": 1},
+                platform_limits={"instagram": 2},
             )
         )
 

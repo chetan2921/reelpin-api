@@ -54,14 +54,10 @@ def default_url_processing_metadata(source: SourceIdentity) -> dict:
     defaults = {
         "instagram_reel": ("instagram_reel_pipeline", "groq_whisper"),
         "instagram_post": ("instagram_post_pipeline", "groq_vision_ocr"),
-        "youtube_short": ("youtube_short_pipeline", "youtube_transcript_api"),
-        "youtube_video": ("youtube_video_pipeline", "youtube_transcript_api"),
-        "tiktok": ("tiktok_pipeline", "groq_whisper"),
-        "web": ("web_pipeline", "groq_whisper"),
     }
     ingestion_method, transcript_source = defaults.get(
         handler_key,
-        ("web_pipeline", "groq_whisper"),
+        ("instagram_reel_pipeline", "groq_whisper"),
     )
     return build_url_processing_metadata(
         source,

@@ -58,12 +58,11 @@ def build_secret_configuration_summary(settings) -> dict:
         "supabase_key_source": _supabase_key_source(settings),
         "firebase_credential_source": _firebase_credential_source(settings),
         "cookie_slots": {
-            platform: {
-                "active": has_cookie_slot(settings, platform, "active"),
-                "backup": has_cookie_slot(settings, platform, "backup"),
-                "tertiary": has_cookie_slot(settings, platform, "tertiary"),
+            "instagram": {
+                "active": has_cookie_slot(settings, "instagram", "active"),
+                "backup": has_cookie_slot(settings, "instagram", "backup"),
+                "tertiary": has_cookie_slot(settings, "instagram", "tertiary"),
             }
-            for platform in ["instagram", "youtube", "tiktok", "ytdlp"]
         },
         "instagram_cookie_health": inspect_instagram_cookie_slots(settings),
         "deprecated_envs_in_use": deprecated_secret_envs(settings),
@@ -122,13 +121,6 @@ def has_cookie_slot(settings, platform: str, slot_name: str) -> bool:
             getattr(namespace, f"{prefix}_COOKIE_DATA_BASE64", None),
             getattr(namespace, f"{prefix}_COOKIES_FILE", None),
         ]
-        if platform == "ytdlp":
-            legacy_values.extend(
-                [
-                    getattr(namespace, "YTDLP_COOKIE_DATA", None),
-                    getattr(namespace, "YTDLP_COOKIE_DATA_BASE64", None),
-                ]
-            )
         if any(bool(value) for value in legacy_values):
             return True
 
@@ -143,12 +135,6 @@ def deprecated_secret_envs(settings) -> list[str]:
         "INSTAGRAM_COOKIES_FILE",
         "INSTAGRAM_COOKIE_DATA",
         "INSTAGRAM_COOKIE_DATA_BASE64",
-        "YOUTUBE_COOKIE_DATA",
-        "YOUTUBE_COOKIE_DATA_BASE64",
-        "TIKTOK_COOKIE_DATA",
-        "TIKTOK_COOKIE_DATA_BASE64",
-        "YTDLP_COOKIE_DATA",
-        "YTDLP_COOKIE_DATA_BASE64",
     ]:
         if getattr(namespace, env_name, None):
             deprecated.append(env_name)

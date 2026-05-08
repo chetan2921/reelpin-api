@@ -17,9 +17,9 @@ class FailureClassificationTests(unittest.TestCase):
         )
         self.assertEqual(failure.code, FailureCode.auth_failure)
 
-    def test_classifies_youtube_ip_block_as_auth_failure(self):
+    def test_classifies_ip_block_as_auth_failure(self):
         failure = classify_processing_failure(
-            Exception("YouTube is blocking requests from your IP.")
+            Exception("Instagram is blocking requests from your IP.")
         )
         self.assertEqual(failure.code, FailureCode.auth_failure)
 
@@ -35,11 +35,11 @@ class FailureClassificationTests(unittest.TestCase):
 
     def test_classifies_transcript_unavailable(self):
         failure = classify_processing_failure(
-            Exception("No usable YouTube transcript was available for this video.")
+            Exception("Failed to transcribe audio: provider error")
         )
         self.assertEqual(failure.code, FailureCode.transcript_unavailable)
 
-    def test_classifies_youtube_transcript_retrieval_failure(self):
+    def test_classifies_transcript_retrieval_failure(self):
         failure = classify_processing_failure(
             Exception("Could not retrieve a transcript for the video")
         )

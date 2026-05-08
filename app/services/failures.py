@@ -93,8 +93,6 @@ def classify_processing_failure(
     if _matches_any(
         lowered,
         [
-            "no usable youtube transcript",
-            "youtube transcript was empty",
             "transcript unavailable",
             "transcript was empty",
             "failed to transcribe audio",
@@ -108,7 +106,6 @@ def classify_processing_failure(
         [
             "image post instead of a video",
             "unsupported",
-            "could not determine the youtube video id",
         ],
     ):
         return ProcessingFailure(FailureCode.unsupported_post_type, message)

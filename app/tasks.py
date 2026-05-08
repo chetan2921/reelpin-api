@@ -6,7 +6,6 @@ import socket
 import time
 from datetime import datetime, timezone
 from time import perf_counter
-from urllib.parse import urlparse
 
 from app.config import get_settings
 from app.models import ProcessingJobStatus
@@ -51,14 +50,7 @@ class JobClaimLostError(RuntimeError):
 
 
 def _derive_platform(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
-    if "instagram" in host:
-        return "instagram"
-    if "tiktok" in host:
-        return "tiktok"
-    if "youtube" in host or "youtu.be" in host:
-        return "youtube"
-    return "web"
+    return "instagram"
 
 
 def process_reel_job(job: dict, *, worker_id: str) -> None:
@@ -349,9 +341,6 @@ def _progress_update(*, step: str, progress: int, extra: dict, state: dict) -> d
 def _platform_limits() -> dict[str, int]:
     return {
         "instagram": max(1, settings.WORKER_INSTAGRAM_CONCURRENCY),
-        "tiktok": max(1, settings.WORKER_TIKTOK_CONCURRENCY),
-        "youtube": max(1, settings.WORKER_YOUTUBE_CONCURRENCY),
-        "web": max(1, settings.WORKER_WEB_CONCURRENCY),
     }
 
 

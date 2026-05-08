@@ -9,19 +9,19 @@ from app.services.source_identity import resolve_source_identity
 
 
 class ProcessingMetadataTests(unittest.TestCase):
-    def test_build_url_processing_metadata_for_youtube_transcript(self):
-        source = resolve_source_identity("https://www.youtube.com/shorts/abc123XYZ09")
+    def test_build_url_processing_metadata_for_instagram_reel(self):
+        source = resolve_source_identity("https://www.instagram.com/reel/ABC123/")
         metadata = build_url_processing_metadata(
             source,
-            ingestion_method="youtube_short_pipeline",
-            transcript_source="youtube_transcript_api",
+            ingestion_method="instagram_reel_pipeline",
+            transcript_source="groq_whisper",
         )
 
-        self.assertEqual(metadata["source_platform"], "youtube")
-        self.assertEqual(metadata["source_content_type"], "short")
+        self.assertEqual(metadata["source_platform"], "instagram")
+        self.assertEqual(metadata["source_content_type"], "reel")
         self.assertEqual(metadata["processing_version"], PROCESSING_VERSION)
-        self.assertEqual(metadata["ingestion_method"], "youtube_short_pipeline")
-        self.assertEqual(metadata["transcript_source"], "youtube_transcript_api")
+        self.assertEqual(metadata["ingestion_method"], "instagram_reel_pipeline")
+        self.assertEqual(metadata["transcript_source"], "groq_whisper")
 
     def test_build_direct_upload_metadata_without_url(self):
         metadata = build_direct_upload_metadata("")
