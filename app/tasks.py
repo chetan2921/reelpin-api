@@ -22,7 +22,7 @@ from app.services.database import (
 from app.services.completion_notifications import send_reel_ready_notification
 from app.services.failures import classify_processing_failure
 from app.services.observability import log_processing_event
-from app.services.queue_control import job_source_key
+from app.services.queue_control import job_platform, job_source_key
 from app.services.retry_policy import build_retry_decision
 from app.services.ops_alerts import maybe_send_instagram_cookie_alert
 from app.services.security import (
@@ -393,7 +393,7 @@ def _wait_for_capacity(active_futures: dict[Future, dict]) -> None:
 def _active_platform_counts(active_futures: dict[Future, dict]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for job_meta in active_futures.values():
-        platform = str(job_meta.get("source_platform") or "web")
+        platform = str(job_meta.get("source_platform") or "web").strip() or "web"
         counts[platform] = counts.get(platform, 0) + 1
     return counts
 
@@ -484,10 +484,15 @@ def run_worker() -> None:
                         future = executor.submit(process_reel_job, job, worker_id=WORKER_ID)
                         active_futures[future] = {
                             "job_id": job["id"],
-                            "source_platform": job.get("source_platform"),
+                            "source_platform": job_platform(job),
                             "source_key": job_source_key(job),
                         }
                     if claimed_jobs:
+                        logger.info(
+                            "Worker %s submitted %s claimed processing job(s)",
+                            WORKER_ID,
+                            len(claimed_jobs),
+                        )
                         continue
 
                 if active_futures:

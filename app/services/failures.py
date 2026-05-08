@@ -41,6 +41,8 @@ def classify_processing_failure(
             "deadline exceeded",
             "gateway timeout",
             "connection reset by peer",
+            "http 302",
+            "temporarily blocked",
         ],
     ):
         return ProcessingFailure(FailureCode.provider_timeout, message)
@@ -64,12 +66,16 @@ def classify_processing_failure(
             "login required",
             "authenticated cookies",
             "blocked anonymous download",
+            "blocked requests from your ip",
+            "blocking requests from your ip",
             "cookie",
             "cookies",
             "not logged in",
             "authorization",
             "unauthorized",
             "forbidden",
+            "instagram did not expose a public media url",
+            "requested content is not available",
         ],
     ):
         return ProcessingFailure(FailureCode.auth_failure, message)
@@ -92,6 +98,7 @@ def classify_processing_failure(
             "transcript unavailable",
             "transcript was empty",
             "failed to transcribe audio",
+            "could not retrieve a transcript",
         ],
     ):
         return ProcessingFailure(FailureCode.transcript_unavailable, message)

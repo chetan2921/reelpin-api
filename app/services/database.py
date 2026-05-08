@@ -5,7 +5,8 @@ from app.config import get_settings
 from app.models import ProcessingJobStatus
 from app.services.queue_control import (
     active_source_keys,
-    can_claim_job,
+    job_claim_block_reason,
+    job_platform,
     job_source_key,
 )
 from app.services.source_identity import normalize_source_url, resolve_source_identity
@@ -461,6 +462,7 @@ def claim_available_processing_jobs(
     settings = get_settings()
 
     try:
+        fetch_limit = max(settings.JOB_FETCH_LIMIT, max_jobs * 25)
         queued_result = (
             client.table(PROCESSING_JOBS_TABLE)
             .select("*")
@@ -468,7 +470,7 @@ def claim_available_processing_jobs(
             .lte("next_retry_at", datetime.now(timezone.utc).isoformat())
             .order("next_retry_at")
             .order("created_at")
-            .limit(max(settings.JOB_FETCH_LIMIT, max_jobs * 6))
+            .limit(fetch_limit)
             .execute()
         )
 
@@ -488,17 +490,20 @@ def claim_available_processing_jobs(
         if current_source_keys:
             source_keys.update(current_source_keys)
         claimed_jobs: list[dict] = []
+        skip_counts: dict[str, int] = {}
 
         for job in queued_result.data:
             if len(claimed_jobs) >= max_jobs:
                 break
 
-            if not can_claim_job(
+            block_reason = job_claim_block_reason(
                 job,
                 current_platform_counts=platform_counts,
                 current_source_keys=source_keys,
                 platform_limits=platform_limits,
-            ):
+            )
+            if block_reason:
+                skip_counts[block_reason] = skip_counts.get(block_reason, 0) + 1
                 continue
 
             now = datetime.now(timezone.utc).isoformat()
@@ -528,11 +533,32 @@ def claim_available_processing_jobs(
             if claimed.data:
                 claimed_job = claimed.data[0]
                 claimed_jobs.append(claimed_job)
-                platform = str(claimed_job.get("source_platform") or "web").strip() or "web"
+                platform = job_platform(claimed_job)
                 platform_counts[platform] = platform_counts.get(platform, 0) + 1
                 source_key = job_source_key(claimed_job)
                 if source_key:
                     source_keys.add(source_key)
+            else:
+                skip_counts["claim_race"] = skip_counts.get("claim_race", 0) + 1
+
+        if claimed_jobs:
+            logger.info(
+                "Worker %s claimed %s processing job(s) from %s queued candidate(s)",
+                worker_id,
+                len(claimed_jobs),
+                len(queued_result.data),
+            )
+        elif queued_result.data:
+            logger.info(
+                "Worker %s claimed no jobs from %s queued candidate(s); skipped=%s active_platform_counts=%s platform_limits=%s active_source_count=%s fetch_limit=%s",
+                worker_id,
+                len(queued_result.data),
+                skip_counts,
+                platform_counts,
+                platform_limits,
+                len(source_keys),
+                fetch_limit,
+            )
 
         return claimed_jobs
     except Exception as e:

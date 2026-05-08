@@ -11,13 +11,37 @@ class FailureClassificationTests(unittest.TestCase):
         )
         self.assertEqual(failure.code, FailureCode.auth_failure)
 
+    def test_classifies_instagram_public_media_failure_as_auth_failure(self):
+        failure = classify_processing_failure(
+            Exception("Instagram did not expose a public media URL for this page.")
+        )
+        self.assertEqual(failure.code, FailureCode.auth_failure)
+
+    def test_classifies_youtube_ip_block_as_auth_failure(self):
+        failure = classify_processing_failure(
+            Exception("YouTube is blocking requests from your IP.")
+        )
+        self.assertEqual(failure.code, FailureCode.auth_failure)
+
     def test_classifies_rate_limit(self):
         failure = classify_processing_failure(Exception("429 rate limit exceeded"))
         self.assertEqual(failure.code, FailureCode.rate_limit)
 
+    def test_classifies_instagram_redirect_as_provider_timeout(self):
+        failure = classify_processing_failure(
+            Exception("Instagram page fetch returned HTTP 302")
+        )
+        self.assertEqual(failure.code, FailureCode.provider_timeout)
+
     def test_classifies_transcript_unavailable(self):
         failure = classify_processing_failure(
             Exception("No usable YouTube transcript was available for this video.")
+        )
+        self.assertEqual(failure.code, FailureCode.transcript_unavailable)
+
+    def test_classifies_youtube_transcript_retrieval_failure(self):
+        failure = classify_processing_failure(
+            Exception("Could not retrieve a transcript for the video")
         )
         self.assertEqual(failure.code, FailureCode.transcript_unavailable)
 

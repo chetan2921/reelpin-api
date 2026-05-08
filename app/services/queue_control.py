@@ -6,7 +6,7 @@ from app.services.source_identity import resolve_source_identity
 def active_platform_counts(jobs: list[dict]) -> dict[str, int]:
     counts: Counter[str] = Counter()
     for job in jobs:
-        counts[_job_platform(job)] += 1
+        counts[job_platform(job)] += 1
     return dict(counts)
 
 
@@ -26,15 +26,33 @@ def can_claim_job(
     current_source_keys: set[str],
     platform_limits: dict[str, int],
 ) -> bool:
-    platform = _job_platform(job)
+    return (
+        job_claim_block_reason(
+            job,
+            current_platform_counts=current_platform_counts,
+            current_source_keys=current_source_keys,
+            platform_limits=platform_limits,
+        )
+        is None
+    )
+
+
+def job_claim_block_reason(
+    job: dict,
+    *,
+    current_platform_counts: dict[str, int],
+    current_source_keys: set[str],
+    platform_limits: dict[str, int],
+) -> str | None:
+    platform = job_platform(job)
     if current_platform_counts.get(platform, 0) >= platform_limits.get(platform, 1):
-        return False
+        return "platform_capacity"
 
     source_key = job_source_key(job)
     if source_key and source_key in current_source_keys:
-        return False
+        return "duplicate_source"
 
-    return True
+    return None
 
 
 def job_source_key(job: dict) -> str | None:
@@ -52,7 +70,7 @@ def job_source_key(job: dict) -> str | None:
     return None
 
 
-def _job_platform(job: dict) -> str:
+def job_platform(job: dict) -> str:
     try:
         return resolve_source_identity(str(job.get("url") or "")).source_platform
     except Exception:
